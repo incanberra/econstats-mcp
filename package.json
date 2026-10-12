@@ -1,6 +1,6 @@
 {
   "name": "econstats-mcp",
-  "version": "2.6.0",
+  "version": "2.7.0",
   "description": "Economic data MCP server — FRED, BLS, BEA, IMF, OECD, Eurostat, BIS, EIA, World Bank, ECB with verified source selection",
   "type": "module",
   "bin": {
