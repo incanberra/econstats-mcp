@@ -1,6 +1,6 @@
 # econstats-mcp
 
-Economic data MCP server with an economist's methodology guide. Connects FRED, BLS, BEA, IMF, OECD, Eurostat, BIS, World Bank, and ECB to any MCP-compatible client.
+Economic data MCP server with an economist's methodology guide. Connects FRED, BLS, BEA, IMF, OECD, Eurostat, BIS, EIA, World Bank, and ECB to any MCP-compatible client.
 
 ## What makes it different
 
@@ -21,10 +21,10 @@ curl -fsSL https://bun.sh/install | bash
 # Install from this fork; the npm econstats-mcp package is currently unpublished.
 git clone https://github.com/incanberra/econstats-mcp.git
 cd econstats-mcp
-git switch source-selector
+git switch add-eia
 bun install --frozen-lockfile --ignore-scripts
 
-# Optional: save FRED_API_KEY and BEA_API_KEY in a local .env (excluded from Git).
+# Save keys for the providers you use in a local .env (excluded from Git).
 bun run src/index.ts
 ```
 
@@ -84,6 +84,7 @@ Connect as an MCP server in the OpenBB workspace AI settings.
 | `FRED_API_KEY` | For FRED, inflation adjustment, and release calendar | https://fred.stlouisfed.org/docs/api/api_key.html (free) |
 | `BLS_API_KEY` | Optional | https://data.bls.gov/registrationEngine/ (free, higher rate limits) |
 | `BEA_API_KEY` | Optional | https://apps.bea.gov/API/signup/ (free, for GDP detail) |
+| `EIA_API_KEY` | For EIA | https://www.eia.gov/opendata/register.php (free) |
 
 IMF, OECD, Eurostat, BIS, World Bank, and ECB need no keys.
 
@@ -223,6 +224,36 @@ Responses retain unit/scaling/base definitions, observation status, source and c
 
 References: [BIS API documentation](https://stats.bis.org/api-doc/v2/), [BIS statistics](https://data.bis.org/topics), [Terms of permitted use](https://data.bis.org/help/legal).
 
+## EIA energy statistics
+
+EIA coverage uses the official API v2 hierarchy. Save your registered key as `EIA_API_KEY` in the local `.env` loaded by your MCP configuration, then restart your client. The server requires a key and does not silently substitute a demonstration key. Existing FRED/BEA credentials can remain in the same file.
+
+1. Start with `eia_list_routes` and `route:""`, then descend into a returned route. `query` searches the current node's children, not the entire catalogue.
+2. Inspect `eia_get_metadata` for supported frequencies, data fields, units, required facets and coverage. Supply `facet` to look up code labels; `query`, `offset` and `limit` filter/page through downloaded codes. Large code catalogues may be capped by the API.
+3. Call `eia_get_data` with exact `data_fields` and `facets`. Select every facet, or explicit `series` codes on routes supporting a series facet. Broad/wildcard downloads are rejected. Metadata coverage is a hint, not proof that your selected series has observations.
+
+US residential electricity-price example:
+
+```json
+{
+  "route": "electricity/retail-sales",
+  "frequency": "monthly",
+  "data_fields": ["price"],
+  "facets": { "stateid": ["US"], "sectorid": ["RES"] },
+  "length": 12
+}
+```
+
+Other exact series include Cushing WTI spot (`petroleum/pri/spt`, `series=RWTC`), Henry Hub spot (`natural-gas/pri/fut`, `series=RNGWHHD`), and US regular gasoline, all formulations (`petroleum/pri/gnd`, `series=EMM_EPMR_PTE_NUS_DPG`); each uses the `value` field. Inspect metadata for frequencies and retain reported units. The natural-gas route contains both spot and futures series; the selected code defines the measure.
+
+`start_period`/`end_period` are inclusive; `length` is the total rows per page (1–5000, default 120), **not observations per series**. Use the returned next `offset` to continue; a multi-series page can have different coverage per series. Rows are requested newest first and presented chronologically within each separate series. Reported units, additional labels/status attributes and API warnings are retained. Missing values are omitted and counted rather than treated as zero. Conflicting observations, unexpected facets/frequencies and inconsistent units return MCP errors. Outlook routes (`aeo`, `steo`, `ieo`) are explicitly identified as containing projections/estimates.
+
+Each result cites the exact route, facets, field, frequency, dates and public query URL. API keys are used only in the authenticated request: the API's request echo is discarded, keys are redacted from returned data, and citation/cache URLs omit the key. Errors are not cached. EIA's rate limits return an actionable tool error; no immediate retry is attempted.
+
+The source selector supports `residential_electricity_price`, `residential_electricity_sales`, `wti_spot_price`, `regular_gasoline_price` and `henry_hub_spot_price` for the US. Generic energy labels require clarification/discovery; it does not guess sectors, grades or spot/futures definitions.
+
+References: [EIA API documentation](https://www.eia.gov/opendata/documentation.php), [API browser](https://www.eia.gov/opendata/browser/), [Key registration](https://www.eia.gov/opendata/register.php).
+
 ## Choosing a source
 
 Call `select_source` before choosing between overlapping providers. It uses a deterministic, curated registry of exact statistical definitions and geography/frequency rules, then optionally checks current metadata and observations. It returns ranked candidates, reasons, key readiness, concrete retrieval calls, checked country periods, latest common period, observation counts, age and provenance links. It recommends only a candidate meeting the requested coverage; failed, sparse, missing-key and stale candidates remain visible.
@@ -264,6 +295,7 @@ TTL policy is source-aware:
 - OECD catalogue and structures: 7 days
 - Eurostat data: 6 hours; catalogue and structures: 24 hours
 - BIS data: 6 hours; catalogue and structures: 7 days
+- EIA data: 1 hour; route metadata and facet codes: 24 hours
 - World Bank and BLS lookup catalogs: days to weeks
 - Release calendar: 15 minutes
 
@@ -271,7 +303,7 @@ The cache layer also deduplicates in-flight requests, so a burst of identical Op
 
 Startup prefetch is disabled by default because short-lived stdio clients can create unnecessary upstream traffic. Turn it on only when you are running a persistent shared MCP service.
 
-## Tools (23)
+## Tools (26)
 
 | Tool | Description |
 |------|-------------|
@@ -293,6 +325,9 @@ Startup prefetch is disabled by default because short-lived stdio clients can cr
 | `bis_list_datasets` | Discover BIS credit, banking, property-price, rate and other statistical datasets |
 | `bis_get_structure` | Inspect ordered BIS dimensions, definitions and code labels |
 | `bis_get_data` | Fetch BIS observations with units, compilation notes, flags and citation URLs |
+| `eia_list_routes` | Browse and search children in EIA's energy-data hierarchy |
+| `eia_get_metadata` | Inspect EIA definitions, frequencies, fields and facet codes |
+| `eia_get_data` | Fetch selected EIA energy observations with reported units and safe citations |
 | `worldbank_get_data` | World Bank development indicators (200+ countries) |
 | `worldbank_search` | Search World Bank indicators |
 | `ecb_get_data` | ECB data (euro area rates, HICP, money supply) |
@@ -301,7 +336,7 @@ Startup prefetch is disabled by default because short-lived stdio clients can cr
 
 ## Data Sources
 
-All data comes from public official statistical APIs. We attribute data to its source agency (Federal Reserve, BLS, BEA, IMF, OECD, Eurostat, BIS, World Bank, ECB). Queries fetch from the source or reuse a cached source response.
+All data comes from public official statistical APIs. We attribute data to its source agency (Federal Reserve, BLS, BEA, IMF, OECD, Eurostat, BIS, EIA, World Bank, ECB). Queries fetch from the source or reuse a cached source response.
 
 ## License
 

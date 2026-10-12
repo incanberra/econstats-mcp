@@ -1,7 +1,7 @@
 {
   "name": "econstats-mcp",
-  "version": "2.4.0",
-  "description": "Economic data MCP server — FRED, BLS, BEA, IMF, OECD, Eurostat, BIS, World Bank, ECB with economist methodology guide",
+  "version": "2.5.0",
+  "description": "Economic data MCP server — FRED, BLS, BEA, IMF, OECD, Eurostat, BIS, EIA, World Bank, ECB with verified source selection",
   "type": "module",
   "bin": {
     "econstats-mcp": "./src/index.ts"
@@ -21,6 +21,7 @@
     "oecd",
     "eurostat",
     "bis",
+    "eia",
     "world-bank",
     "ecb",
     "inflation",

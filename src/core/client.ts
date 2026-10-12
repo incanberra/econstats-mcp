@@ -5,6 +5,7 @@ import { OECD_CATALOG_URL, buildOecdDataUrl, buildOecdStructureUrl, formatOecdCs
 import { EUROSTAT_CATALOG_URL, buildEurostatDataUrl, buildEurostatStructureUrl, formatEurostatDatasets, formatEurostatStructure, formatEurostatJson, validateEurostatFilters, requestEurostat, type EurostatDataParams } from "./eurostat";
 import { BIS_CATALOG_URL, buildBisDataUrl, buildBisStructureUrl, formatBisDatasets, formatBisStructure, getBisDefinition, validateBisKey, formatBisCsv, requestBis, type BisDataParams } from "./bis";
 import {selectSource, type SelectionParams, type Retrieval} from "./selection";
+import {buildEiaMetadataUrl,buildEiaDataUrl,validateEiaMetadata,validateEiaSelection,formatEiaRoutes,formatEiaMetadata,formatEiaFacets,formatEiaData,requestEia,type EiaDataParams} from "./eia";
 
 type FredUnits = "lin" | "pc1" | "pch" | "ch1" | "chg";
 
@@ -26,6 +27,8 @@ const TTL = {
   eurostatMetadata: 24 * 60 * 60,
   bisData: 6 * 60 * 60,
   bisMetadata: 7 * 24 * 60 * 60,
+  eiaData: 60 * 60,
+  eiaMetadata: 24 * 60 * 60,
   worldBankData: 7 * 24 * 60 * 60,
   worldBankSearch: 7 * 24 * 60 * 60,
   ecbData: 24 * 60 * 60,
@@ -52,10 +55,11 @@ export class EconStatsCoreClient {
   private cache: LayeredCache;
 
   constructor(
-    private env = {
+    private env: {FRED_KEY?:string;BLS_KEY?:string;BEA_KEY?:string;EIA_KEY?:string} = {
       FRED_KEY: process.env.FRED_API_KEY,
       BLS_KEY: process.env.BLS_API_KEY,
       BEA_KEY: process.env.BEA_API_KEY,
+      EIA_KEY: process.env.EIA_API_KEY,
     },
     cache = createLayeredCache(),
   ) {
@@ -67,7 +71,7 @@ export class EconStatsCoreClient {
   }
 
   async selectSource(params: SelectionParams): Promise<string> {
-    return JSON.stringify(await selectSource(params,{FRED:!!this.env.FRED_KEY,BEA:!!this.env.BEA_KEY},r=>this.selectionProbe(r)),null,2);
+    return JSON.stringify(await selectSource(params,{FRED:!!this.env.FRED_KEY,BEA:!!this.env.BEA_KEY,EIA:!!this.env.EIA_KEY},r=>this.selectionProbe(r)),null,2);
   }
 
   private async selectionProbe(r: Retrieval): Promise<string> {
@@ -91,6 +95,8 @@ export class EconStatsCoreClient {
       case "bis_get_data":return this.bisGetData({datasetId:a.dataset_id,seriesKey:a.series_key,limit:a.limit});
       case "worldbank_get_data":return this.worldBankGetData({countryCodes:a.country_codes,indicator:a.indicator,startYear:a.start_year,endYear:a.end_year});
       case "ecb_get_data":return this.ecbGetData({flowRef:a.flow_ref,key:a.key,startPeriod:a.start_period});
+      case "eia_get_metadata":return this.eiaGetMetadata(a.route);
+      case "eia_get_data":return this.eiaGetData({route:a.route,frequency:a.frequency,fields:a.data_fields,facets:a.facets,length:a.length});
       default:throw new Error("No registered probe for this tool.");
     }
   }
@@ -491,6 +497,40 @@ export class EconStatsCoreClient {
     } catch (error) {
       return `BIS error: ${error instanceof Error ? error.message : "Request failed"}`;
     }
+  }
+
+  private async eiaMetadata(route:string):Promise<any>{
+    if(!this.env.EIA_KEY)throw new Error("EIA_API_KEY is not configured. Get a free key at https://www.eia.gov/opendata/register.php and save it in the local .env file.");
+    const url=buildEiaMetadataUrl(route);
+    return this.cache.getOrCompute(`eia:metadata:v1:${url}`,TTL.eiaMetadata,async()=>{
+      const data=await requestEia(url,this.env.EIA_KEY);validateEiaMetadata(data);return data;
+    });
+  }
+
+  async eiaListRoutes(route="",query?:string,offset=0,limit=20):Promise<string>{
+    try{return formatEiaRoutes(await this.eiaMetadata(route),route,query,offset,limit);}
+    catch(e){return `EIA error: ${e instanceof Error?e.message:"Lookup failed"}`;}
+  }
+
+  async eiaGetMetadata(route:string,facet?:string,query?:string,offset=0,limit=30):Promise<string>{
+    try{
+      const meta=await this.eiaMetadata(route);
+      if(!facet)return formatEiaMetadata(meta,route);
+      if(!meta.facets?.some((f:any)=>f.id===facet))throw new Error("Unknown EIA facet. Inspect route metadata.");
+      const url=buildEiaMetadataUrl(route,facet);
+      const data=await this.cache.getOrCompute(`eia:facet:v1:${url}`,TTL.eiaMetadata,async()=>{
+        const response=await requestEia(url,this.env.EIA_KEY);formatEiaFacets(response,url);return response;
+      });
+      return formatEiaFacets(data,url,query,offset,limit);
+    }catch(e){return `EIA error: ${e instanceof Error?e.message:"Lookup failed"}`;}
+  }
+
+  async eiaGetData(params:EiaDataParams):Promise<string>{
+    try{
+      const url=buildEiaDataUrl(params),meta=await this.eiaMetadata(params.route);
+      validateEiaSelection(meta,params);
+      return await this.cache.getOrCompute(`eia:data:v1:${url}`,TTL.eiaData,async()=>formatEiaData(await requestEia(url,this.env.EIA_KEY),url,params,meta));
+    }catch(e){return `EIA error: ${e instanceof Error?e.message:"Lookup failed"}`;}
   }
 
   async worldBankGetData(params: {

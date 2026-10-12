@@ -3,7 +3,7 @@
  * EconStats MCP Server v2
  *
  * Economic data tools with methodology guide.
- * FRED, BLS, BEA, IMF, OECD, Eurostat, BIS, World Bank, ECB + inflation adjustment.
+ * FRED, BLS, BEA, IMF, OECD, Eurostat, BIS, EIA, World Bank, ECB + inflation adjustment.
  *
  * Usage:
  *   bunx econstats-mcp          (stdio, for Claude Desktop/Code)
@@ -24,13 +24,14 @@ function imfTxt(text: string) { return { ...txt(text), ...(text.startsWith("IMF 
 function oecdTxt(text: string) { return { ...txt(text), ...(text.startsWith("OECD error:") ? { isError: true } : {}) }; }
 function eurostatTxt(text: string) { return { ...txt(text), ...(text.startsWith("Eurostat error:") ? { isError: true } : {}) }; }
 function bisTxt(text: string) { return { ...txt(text), ...(text.startsWith("BIS error:") ? { isError: true } : {}) }; }
+function eiaTxt(text: string) { return { ...txt(text), ...(text.startsWith("EIA error:") ? { isError: true } : {}) }; }
 const client = new EconStatsCoreClient();
 
 // ── Server ──────────────────────────────────────────────────────────────
 
 const server = new McpServer({
   name: "econstats",
-  version: "2.4.0",
+  version: "2.5.0",
   instructions: `You are an expert economic analyst. Plain English in, cited analysis out.
 
 HARD RULES:
@@ -52,6 +53,7 @@ SOURCE ROUTING:
 - OECD comparisons, productivity, labour markets → oecd_list_datasets, oecd_get_structure, then oecd_get_data. Always inspect dataset dimensions and definitions first.
 - Detailed European statistics → eurostat_list_datasets, eurostat_get_structure, eurostat_get_data. Use current datasets and explicit non-time filters; check coverage and dataset notes for discontinued series.
 - Credit, debt service, international banking, property prices and effective exchange rates across countries → bis_list_datasets, bis_get_structure, bis_get_data. Validate sector, valuation, adjustment, units, real/nominal definitions and breaks.
+- Energy prices, production, stocks, electricity and other energy statistics → eia_list_routes, eia_get_metadata, eia_get_data. Requires EIA_API_KEY. Distinguish spot/futures, grade/sector, units and observed statistics versus outlook projections. Never include the API key in citations.
 - ECB monetary policy, euro-area monetary aggregates and bank statistics → ecb_get_data; European inflation and national accounts → Eurostat, using comparable definitions.
 - "What is $X worth today?" → inflation_adjust
 - Release day (jobs, CPI, GDP) → check_release_calendar, then BLS/BEA direct
@@ -319,6 +321,26 @@ server.tool(
     limit: z.number().int().min(1).max(120).default(36).describe("Latest observations shown per series, default 36"),
   },
   async ({ dataset_id, version, series_key, start_period, end_period, limit }) => bisTxt(await client.bisGetData({datasetId:dataset_id,version,seriesKey:series_key,startPeriod:start_period,endPeriod:end_period,limit}))
+);
+
+// ── EIA ─────────────────────────────────────────────────────────────────
+server.tool(
+  "eia_list_routes",
+  "Browse EIA's current API hierarchy for energy data. Search child routes within a node; this is not a global catalogue search. Start with route='' for electricity, petroleum, natural-gas, international, outlooks and other categories, then descend. Requires EIA_API_KEY.",
+  {route:z.string().default(""),query:z.string().optional(),offset:z.number().int().min(0).default(0),limit:z.number().int().min(1).max(50).default(20)},
+  async({route,query,offset,limit})=>eiaTxt(await client.eiaListRoutes(route,query,offset,limit))
+);
+server.tool(
+  "eia_get_metadata",
+  "Inspect EIA route definitions, frequency, facets, data fields/units and coverage. With facet, fetch code labels and filter the downloaded codes using query/offset/limit. Metadata coverage is not proof of selected-series observations. Requires EIA_API_KEY.",
+  {route:z.string(),facet:z.string().optional(),query:z.string().optional(),offset:z.number().int().min(0).default(0),limit:z.number().int().min(1).max(60).default(30)},
+  async({route,facet,query,offset,limit})=>eiaTxt(await client.eiaGetMetadata(route,facet,query,offset,limit))
+);
+server.tool(
+  "eia_get_data",
+  "Fetch EIA API v2 data with reported units, exact facets, dates and citation query (API key omitted). Inspect metadata first. Select every facet, or explicit series codes on routes with a series facet. length is total rows per page, not observations per series; use offset to continue. Keep states/sectors/products and spot/futures distinct. Outlook routes contain projections. Requires EIA_API_KEY.",
+  {route:z.string(),frequency:z.string(),data_fields:z.array(z.string()).min(1).max(5),facets:z.record(z.string(),z.array(z.string()).min(1).max(50)),start_period:z.string().optional(),end_period:z.string().optional(),length:z.number().int().min(1).max(5000).default(120),offset:z.number().int().min(0).default(0)},
+  async({route,frequency,data_fields,facets,start_period,end_period,length,offset})=>eiaTxt(await client.eiaGetData({route,frequency,fields:data_fields,facets,startPeriod:start_period,endPeriod:end_period,length,offset}))
 );
 
 // ── World Bank ──────────────────────────────────────────────────────────
