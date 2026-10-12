@@ -4,6 +4,7 @@ import { buildImfDataUrl, fetchImfData, fetchImfDatasets, fetchImfStructure, typ
 import { OECD_CATALOG_URL, buildOecdDataUrl, buildOecdStructureUrl, formatOecdCsv, formatOecdDatasets, formatOecdStructure, requestOecd, type OecdDataParams } from "./oecd";
 import { EUROSTAT_CATALOG_URL, buildEurostatDataUrl, buildEurostatStructureUrl, formatEurostatDatasets, formatEurostatStructure, formatEurostatJson, validateEurostatFilters, requestEurostat, type EurostatDataParams } from "./eurostat";
 import { BIS_CATALOG_URL, buildBisDataUrl, buildBisStructureUrl, formatBisDatasets, formatBisStructure, getBisDefinition, validateBisKey, formatBisCsv, requestBis, type BisDataParams } from "./bis";
+import {selectSource, type SelectionParams, type Retrieval} from "./selection";
 
 type FredUnits = "lin" | "pc1" | "pch" | "ch1" | "chg";
 
@@ -63,6 +64,35 @@ export class EconStatsCoreClient {
 
   private fredSeriesTtl(seriesId: string): number {
     return HOT_FRED_SERIES.has(seriesId) ? TTL.fredSeriesHot : TTL.fredSeriesStandard;
+  }
+
+  async selectSource(params: SelectionParams): Promise<string> {
+    return JSON.stringify(await selectSource(params,{FRED:!!this.env.FRED_KEY,BEA:!!this.env.BEA_KEY},r=>this.selectionProbe(r)),null,2);
+  }
+
+  private async selectionProbe(r: Retrieval): Promise<string> {
+    const a=r.arguments;
+    switch(r.tool){
+      case "fred_get_series":return this.fredGetSeries(a.series_id,a.limit,a.units);
+      case "bls_get_series":return this.blsGetSeries(a.series_ids,a.start_year,a.end_year);
+      case "bea_get_data":{
+        const text=await this.beaGetData(a.dataset,a.table_name,a.frequency,a.year);
+        // Only the GDP line in these GDP tables establishes coverage of this measure.
+        const section=text.split(/\n\n(?=## BEA:)/).find(s=>/^## BEA: Gross domestic product\s*\n/.test(s));
+        return section??"No gross domestic product line returned.";
+      }
+      case "imf_get_structure":return this.imfGetStructure(a.database_id);
+      case "imf_get_data":return this.imfGetData({databaseId:a.database_id,seriesKey:a.series_key,limit:a.limit});
+      case "oecd_get_structure":return this.oecdGetStructure(a.dataset_id);
+      case "oecd_get_data":return this.oecdGetData({datasetId:a.dataset_id,seriesKey:a.series_key,limit:a.limit});
+      case "eurostat_get_structure":return this.eurostatGetStructure(a.dataset_id);
+      case "eurostat_get_data":return this.eurostatGetData({datasetId:a.dataset_id,filters:a.filters,limit:a.limit});
+      case "bis_get_structure":return this.bisGetStructure(a.dataset_id);
+      case "bis_get_data":return this.bisGetData({datasetId:a.dataset_id,seriesKey:a.series_key,limit:a.limit});
+      case "worldbank_get_data":return this.worldBankGetData({countryCodes:a.country_codes,indicator:a.indicator,startYear:a.start_year,endYear:a.end_year});
+      case "ecb_get_data":return this.ecbGetData({flowRef:a.flow_ref,key:a.key,startPeriod:a.start_period});
+      default:throw new Error("No registered probe for this tool.");
+    }
   }
 
   async fredSearch(query: string): Promise<string> {

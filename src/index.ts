@@ -17,6 +17,7 @@ import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { EconStatsCoreClient } from "./core/client";
+import { MEASURES, SOURCES } from "./core/selection";
 
 function txt(text: string) { return { content: [{ type: "text" as const, text }] }; }
 function imfTxt(text: string) { return { ...txt(text), ...(text.startsWith("IMF error:") ? { isError: true } : {}) }; }
@@ -29,7 +30,7 @@ const client = new EconStatsCoreClient();
 
 const server = new McpServer({
   name: "econstats",
-  version: "2.3.0",
+  version: "2.4.0",
   instructions: `You are an expert economic analyst. Plain English in, cited analysis out.
 
 HARD RULES:
@@ -40,6 +41,7 @@ HARD RULES:
 - Don't compute averages or trends in your head — cite specific data points.
 
 SOURCE ROUTING:
+- For source recommendations, call select_source with an exact measure and country codes. It returns ranked retrieval plans and optional live coverage checks. Never treat an unverified plan as confirmed data or silently override a preferred source. If no exact match is verified, refine the definition or use provider discovery tools.
 - Honor an explicitly requested source. Otherwise choose by the requested measure, geography, frequency, comparable definitions and latest usable observations; there is no universal best source.
 - Prefer the original statistical producer for release-day or detailed national figures. FRED is convenient redistribution; identify the underlying producer when available. Prefer harmonised definitions for country comparisons.
 - US macro → fred_get_series (check series_id from common IDs below)
@@ -73,6 +75,25 @@ T10Y2Y (yield curve), MORTGAGE30US (30yr mortgage), HOUST (housing starts),
 CSUSHPINSA (Case-Shiller), SP500 (S&P 500), JTSJOL (job openings), JTSQUR (quits rate),
 CES0500000003 (avg hourly earnings), RSAFS (retail sales), PSAVERT (savings rate).`,
 });
+
+server.tool(
+  "select_source",
+  "Recommend economic sources for an EXACT measure and countries. Uses a curated registry, checks metadata and samples live observations by default, returns common periods, coverage counts, age, ranked alternatives and concrete retrieval calls. No silent CPI/CPIH/HICP or GDP-growth substitutions. Honor preferred_source even if unavailable; verify=false returns explicitly unverified plans. Coverage checks are not an exhaustive catalogue or vintage audit. Some recognized measures require dataset discovery when no exact template is registered.",
+  {
+    measure:z.enum(MEASURES).describe("Exact statistical definition; ask the user if the requested definition is ambiguous"),
+    countries:z.array(z.string()).min(1).max(5).describe("ISO2/ISO3 codes, e.g. US/USA, GB/GBR, DE/DEU; EA for euro area"),
+    frequency:z.enum(["daily","weekly","monthly","quarterly","annual"]).optional(),
+    purpose:z.enum(["latest","comparison","release"]).optional(),
+    preferred_source:z.enum(SOURCES).optional().describe("Explicit source override; alternatives do not override it"),
+    observations:z.number().int().min(1).max(120).default(12).describe("Required common observations per country; incomplete coverage is disclosed"),
+    verify:z.boolean().default(true).describe("Check live metadata and observations, reusing source caches"),
+    max_age_days:z.number().int().min(0).optional().describe("Maximum age of latest common observation period, measured at period end"),
+  },
+  async ({measure,countries,frequency,purpose,preferred_source,observations,verify,max_age_days})=>{
+    try{return txt(await client.selectSource({measure,countries,frequency,purpose,preferredSource:preferred_source,observations,verify,maxAgeDays:max_age_days}));}
+    catch{return {...txt("Source selection error: invalid request or unavailable lookup. Check the measure, country codes and frequency."),isError:true};}
+  }
+);
 
 // ── FRED ────────────────────────────────────────────────────────────────
 
