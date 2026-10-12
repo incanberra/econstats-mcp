@@ -2,6 +2,7 @@ import {afterEach,describe,expect,test} from "bun:test";
 import {buildEiaDataUrl,buildEiaMetadataUrl,validateEiaSelection,formatEiaRoutes,formatEiaMetadata,formatEiaFacets,formatEiaData,requestEia} from "../src/core/eia";
 import {EconStatsCoreClient} from "../src/core/client";
 import {rankSources} from "../src/core/selection";
+import {resetAccessState} from "../src/core/access";
 const p={route:"electricity/retail-sales",frequency:"monthly",fields:["price"],facets:{stateid:["US","CO"],sectorid:["RES"]},length:3};
 const meta={id:"retail-sales",name:"Electricity retail sales",frequency:[{id:"monthly",format:"YYYY-MM"}],facets:[{id:"stateid"},{id:"sectorid"}],data:{price:{units:"cents per kilowatt-hour"}},startPeriod:"2001-01",endPeriod:"2026-07"};
 const data={total:"50",frequency:"monthly",data:[{period:"2026-07",stateid:"US",sectorid:"RES",stateDescription:"U.S. Total",price:"0","price-units":"cents per kilowatt-hour"},{period:"2026-07",stateid:"CO",sectorid:"RES",stateDescription:"Colorado",price:"-0.2","price-units":"cents per kilowatt-hour"},{period:"2026-06",stateid:"CO",sectorid:"RES",stateDescription:"Colorado",price:null,"price-units":"cents per kilowatt-hour"}]};
@@ -63,7 +64,10 @@ test("missing/invalid keys and network errors do not expose credentials",async()
 test("API failures are not cached; successful public data and metadata are shared",async()=>{
  let calls=0;globalThis.fetch=(async(input:any)=>{if(!String(input).includes("/data/"))return new Response(JSON.stringify({response:meta}));calls++;return calls===1?new Response("limited",{status:429}):new Response(JSON.stringify({response:data,request:{api_key:"secret_test_key"}}));}) as typeof fetch;
  const c=new EconStatsCoreClient({EIA_KEY:"secret_test_key"});
- expect(await c.eiaGetData(p)).toContain("EIA error: EIA rate limit");expect(await c.eiaGetData(p)).toContain("2026-07: 0");
+ expect(await c.eiaGetData(p)).toContain("EIA error: EIA rate limit");
+ expect(await c.eiaGetData(p)).toContain("cooldown");expect(calls).toBe(1);
+ resetAccessState(); // Simulate a new request window, preserving the data cache.
+ expect(await c.eiaGetData(p)).toContain("2026-07: 0");
  expect(await c.eiaGetData(p)).not.toContain("secret_test_key");expect(calls).toBe(2);
 });
 test("invalid selectors never download observations and malformed payloads are not cached",async()=>{

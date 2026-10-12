@@ -1,5 +1,7 @@
 import { createLayeredCache, type LayeredCache } from "./cache";
-import { fetchRetry } from "./http";
+import {checkedJson,legacyFailure,worldBankPages,worldBankUrl,formatWorldBank,ecbUrl,formatEcb} from "./legacy";
+import {AccessError,accessGovernor,type Provider} from "./access";
+import {connectionHealth} from "./health";
 import { buildImfDataUrl, fetchImfData, fetchImfDatasets, fetchImfStructure, type ImfDataParams } from "./imf";
 import { OECD_CATALOG_URL, buildOecdDataUrl, buildOecdStructureUrl, formatOecdCsv, formatOecdDatasets, formatOecdStructure, requestOecd, type OecdDataParams } from "./oecd";
 import { EUROSTAT_CATALOG_URL, buildEurostatDataUrl, buildEurostatStructureUrl, formatEurostatDatasets, formatEurostatStructure, formatEurostatJson, validateEurostatFilters, requestEurostat, type EurostatDataParams } from "./eurostat";
@@ -66,6 +68,22 @@ export class EconStatsCoreClient {
     this.cache = cache;
   }
 
+
+  private async legacyCall(provider:Provider,work:()=>Promise<string>):Promise<string>{
+    try{return await work();}catch(error){
+      const kind=error instanceof AccessError?error.kind:"invalid_response";
+      if(kind!=="budget_exhausted"&&kind!=="rate_limited")await accessGovernor().record(provider,kind).catch(()=>{});
+      return `${provider} error: ${error instanceof AccessError?error.message:"Invalid response or request; check parameters and provider metadata."}`;
+    }
+  }
+  async connectionHealth(sources?:Provider[],probe=false){return JSON.stringify(await connectionHealth(this.env,sources,probe),null,2);}
+  async fredSearch(query:string){return this.legacyCall("FRED",()=>this.fredSearchUnsafe(query));}
+  async fredGetSeries(seriesId:string,limit:number,units:FredUnits){return this.legacyCall("FRED",()=>this.fredGetSeriesUnsafe(seriesId,limit,units));}
+  async blsGetSeries(seriesIds:string[],startYear?:string,endYear?:string){return this.legacyCall("BLS",()=>this.blsGetSeriesUnsafe(seriesIds,startYear,endYear));}
+  async beaGetData(dataset:"NIPA"|"Regional"|"GDPbyIndustry",tableName:string,frequency:"A"|"Q"|"M",year:string){return this.legacyCall("BEA",()=>this.beaGetDataUnsafe(dataset,tableName,frequency,year));}
+  async inflationAdjust(amount:number,fromDate:string,toDate:string){return this.legacyCall("FRED",()=>this.inflationAdjustUnsafe(amount,fromDate,toDate));}
+  async checkReleaseCalendar(){return this.legacyCall("FRED",()=>this.checkReleaseCalendarUnsafe());}
+
   private fredSeriesTtl(seriesId: string): number {
     return HOT_FRED_SERIES.has(seriesId) ? TTL.fredSeriesHot : TTL.fredSeriesStandard;
   }
@@ -101,15 +119,16 @@ export class EconStatsCoreClient {
     }
   }
 
-  async fredSearch(query: string): Promise<string> {
-    if (!this.env.FRED_KEY) return "FRED_API_KEY not configured";
+  private async fredSearchUnsafe(query: string): Promise<string> {
+    if (!this.env.FRED_KEY) throw new AccessError("FRED","missing_key","FRED_API_KEY is not configured.");
 
     const key = `fred:search:${query.trim().toLowerCase()}`;
     return this.cache.getOrCompute(key, TTL.fredSearch, async () => {
-      const res = await fetchRetry(
+      const res = await checkedJson(
         `https://api.stlouisfed.org/fred/series/search?search_text=${encodeURIComponent(query)}&api_key=${this.env.FRED_KEY}&file_type=json&limit=8`,
       );
-      const data = await res.json();
+      const data = res;
+      if(!Array.isArray(data.seriess))legacyFailure("FRED","invalid_response","Missing FRED search results.");
       return (
         data.seriess
           ?.map(
@@ -121,28 +140,31 @@ export class EconStatsCoreClient {
     });
   }
 
-  async fredGetSeries(
+  private async fredGetSeriesUnsafe(
     seriesId: string,
     limit: number,
     units: FredUnits,
   ): Promise<string> {
-    if (!this.env.FRED_KEY) return "FRED_API_KEY not configured";
+    if (!this.env.FRED_KEY) throw new AccessError("FRED","missing_key","FRED_API_KEY is not configured.");
 
-    const obsKey = `fred:obs:${seriesId}:limit=${limit}:units=${units}`;
-    const infoKey = `fred:info:${seriesId}`;
+    if(!/^[A-Za-z0-9_]{1,100}$/.test(seriesId)||!Number.isInteger(limit)||limit<1||limit>5000||!["lin","pc1","pch","ch1","chg"].includes(units))throw new Error("Invalid FRED series, transformation or observation limit.");
+    const obsKey = `fred:obs:v3:${seriesId}:limit=${limit}:units=${units}`;
+    const infoKey = `fred:info:v3:${seriesId}`;
 
     const [obsText, infoText] = await Promise.all([
       this.cache.getOrCompute(obsKey, this.fredSeriesTtl(seriesId), async () => {
-        const res = await fetchRetry(
+        const res = await checkedJson(
           `https://api.stlouisfed.org/fred/series/observations?series_id=${seriesId}&api_key=${this.env.FRED_KEY}&file_type=json&sort_order=desc&limit=${limit}&units=${units}`,
         );
-        return await res.text();
+        if(!Array.isArray(res.observations)||res.observations.some((r:any)=>typeof r.date!=="string"||!/^\d{4}-\d{2}-\d{2}$/.test(r.date)||r.value!=="."&&!Number.isFinite(Number(r.value))))legacyFailure("FRED","invalid_response","Invalid FRED observation schema.");
+        return JSON.stringify(res);
       }),
       this.cache.getOrCompute(infoKey, TTL.fredSeriesMeta, async () => {
-        const res = await fetchRetry(
+        const res = await checkedJson(
           `https://api.stlouisfed.org/fred/series?series_id=${seriesId}&api_key=${this.env.FRED_KEY}&file_type=json`,
         );
-        return await res.text();
+        if(!Array.isArray(res.seriess)||res.seriess[0]?.id!==seriesId)legacyFailure("FRED","invalid_response","Missing or unexpected FRED series metadata.");
+        return JSON.stringify(res);
       }),
     ]);
 
@@ -177,7 +199,7 @@ export class EconStatsCoreClient {
     );
   }
 
-  async blsGetSeries(
+  private async blsGetSeriesUnsafe(
     seriesIds: string[],
     startYear?: string,
     endYear?: string,
@@ -185,7 +207,8 @@ export class EconStatsCoreClient {
     const currentYear = new Date().getFullYear();
     const sy = startYear ?? String(currentYear - 3);
     const ey = endYear ?? String(currentYear);
-    const key = `bls:series:${seriesIds.join(",")}:start=${sy}:end=${ey}`;
+    if(!seriesIds.length||seriesIds.length>50||seriesIds.some(s=>!/^[A-Za-z0-9]{8,35}$/.test(s))||!/^\d{4}$/.test(sy)||!/^\d{4}$/.test(ey)||Number(sy)>Number(ey))throw new Error("Invalid BLS series IDs or years.");
+    const key = `bls:series:v3:${seriesIds.join(",")}:start=${sy}:end=${ey}`;
 
     return this.cache.getOrCompute(key, TTL.blsSeries, async () => {
       const body: Record<string, unknown> = {
@@ -197,19 +220,18 @@ export class EconStatsCoreClient {
       };
       if (this.env.BLS_KEY) body.registrationkey = this.env.BLS_KEY;
 
-      const res = await fetchRetry("https://api.bls.gov/publicAPI/v2/timeseries/data/", {
+      const res = await checkedJson("https://api.bls.gov/publicAPI/v2/timeseries/data/", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-      if (!res.ok) return `BLS API error: ${res.status}`;
-
-      const data = await res.json();
+      const data = res;
       if (data.status !== "REQUEST_SUCCEEDED") {
-        return data.message?.join("; ") ?? "BLS error";
+        legacyFailure("BLS","request_rejected","BLS rejected the query.");
       }
 
-      const results = (data.Results?.series ?? []).map(
+      if(!Array.isArray(data.Results?.series))legacyFailure("BLS","invalid_response","Missing BLS series array.");
+      const results = data.Results.series.map(
         (series: {
           seriesID: string;
           catalog?: { series_title?: string };
@@ -224,6 +246,7 @@ export class EconStatsCoreClient {
           }[];
         }) => {
           const sid = series.seriesID;
+          if(!seriesIds.includes(sid)||!Array.isArray(series.data))legacyFailure("BLS","invalid_response","Unexpected BLS series or missing observations.");
           const isIndex = sid.startsWith("CU") || sid.startsWith("WP") || sid.startsWith("PC");
           const isEmployment = sid.startsWith("CE") || sid.startsWith("SM");
           const title = series.catalog?.series_title ?? sid;
@@ -231,6 +254,7 @@ export class EconStatsCoreClient {
           const lines = series.data
             .filter((row) => row.period !== "M13" && row.value !== "-" && row.value !== "")
             .map((row) => {
+              if(!/^\d{4}$/.test(row.year)||!Number.isFinite(Number(row.value)))legacyFailure("BLS","invalid_response","Invalid BLS year or numeric observation.");
               const date = row.period.startsWith("M")
                 ? `${row.year}-${row.period.slice(1)}`
                 : row.year;
@@ -250,7 +274,7 @@ export class EconStatsCoreClient {
           if (isIndex) label += " (YoY % Change)";
           else if (isEmployment) label += " (Monthly Change)";
 
-          return `## ${label} (${sid})\nSource: https://data.bls.gov/timeseries/${sid}\n\n${lines}`;
+          return `## ${label} (${sid})\nSource: https://data.bls.gov/timeseries/${sid}\nYears: ${sy}–${ey}; series definitions and units are identified by the catalogue title/series ID.\nRetrieved: ${new Date().toISOString()}\n\n${lines}`;
         },
       );
 
@@ -300,15 +324,17 @@ export class EconStatsCoreClient {
     });
   }
 
-  async beaGetData(
+  private async beaGetDataUnsafe(
     dataset: "NIPA" | "Regional" | "GDPbyIndustry",
     tableName: string,
     frequency: "A" | "Q" | "M",
     year: string,
   ): Promise<string> {
-    if (!this.env.BEA_KEY) return "BEA_API_KEY not configured";
+    if (!this.env.BEA_KEY) throw new AccessError("BEA","missing_key","BEA_API_KEY is not configured.");
 
-    const key = `bea:data:${dataset}:table=${tableName}:freq=${frequency}:year=${year}`;
+    if(!/^[A-Za-z0-9_]{1,100}$/.test(tableName)||!/^[AQM]$/.test(frequency)||!(/^(?:ALL|LAST5|\d{4}(?:,\d{4})*)$/.test(year)))throw new Error("Invalid BEA table, frequency or years.");
+    const resolvedYear=year==="LAST5"?Array.from({length:5},(_,i)=>String(new Date().getUTCFullYear()-i)).join(","):year;
+    const key = `bea:data:v3:${dataset}:table=${tableName}:freq=${frequency}:year=${resolvedYear}`;
     return this.cache.getOrCompute(key, TTL.beaData, async () => {
       const params = new URLSearchParams({
         UserID: this.env.BEA_KEY!,
@@ -316,37 +342,39 @@ export class EconStatsCoreClient {
         DataSetName: dataset,
         TableName: tableName,
         Frequency: frequency,
-        Year: year,
+        Year: resolvedYear,
         ResultFormat: "JSON",
       });
-      const res = await fetchRetry(`https://apps.bea.gov/api/data/?${params}`);
-      if (!res.ok) return `BEA API error: ${res.status}`;
-
-      const data = await res.json();
+      const res = await checkedJson(`https://apps.bea.gov/api/data/?${params}`);
+      const data = res;
       const beaData = data?.BEAAPI?.Results;
       if (beaData?.Error) {
-        return beaData.Error.APIErrorDescription ?? "BEA error";
+        legacyFailure("BEA","request_rejected","BEA rejected the query.");
       }
 
-      const rows = (beaData?.Data ?? []) as {
+      if(!Array.isArray(beaData?.Data))legacyFailure("BEA","invalid_response","Missing BEA Data array.");
+      const rows = beaData.Data as {
         LineDescription: string;
         TimePeriod: string;
         DataValue: string;
       }[];
-      const byLine = new Map<string, string[]>();
+      const byLine = new Map<string, {unit:string;values:string[]}>();let missing=0;
       for (const row of rows) {
         const line = row.LineDescription ?? "Data";
-        if (!byLine.has(line)) byLine.set(line, []);
+        const unit=["CL_UNIT","UNIT_MULT","METRIC_NAME"].filter(k=>(row as any)[k]!==undefined).map(k=>`${k}=${(row as any)[k]}`).join("; ")||"Units not supplied on row; inspect the table definition.";
+        if (!byLine.has(line)) byLine.set(line, {unit,values:[]});
+        if(byLine.get(line)!.unit!==unit)legacyFailure("BEA","invalid_response","BEA line units changed within this query.");
         const value = row.DataValue?.replace(/,/g, "");
         if (value && value !== "---") {
-          byLine.get(line)!.push(`${row.TimePeriod}: ${value}`);
-        }
+          if(!Number.isFinite(Number(value))||!row.TimePeriod)legacyFailure("BEA","invalid_response","Invalid BEA numeric observation or time period.");
+          byLine.get(line)!.values.push(`${row.TimePeriod}: ${value}`);
+        }else missing++;
       }
 
       return Array.from(byLine.entries())
         .slice(0, 15)
-        .map(([line, observations]) => `## BEA: ${line}\n${observations.join("\n")}`)
-        .join("\n\n");
+        .map(([line, observations]) => `## BEA: ${line}\n${observations.unit}\n${observations.values.sort().join("\n")}`)
+        .join("\n\n")+`\nSource: Bureau of Economic Analysis\nDataset: ${dataset}; table=${tableName}; frequency=${frequency}; years=${resolvedYear}\nURL: https://apps.bea.gov/api/data/?method=GetData&DataSetName=${encodeURIComponent(dataset)}&TableName=${encodeURIComponent(tableName)}&Frequency=${frequency}&Year=${encodeURIComponent(resolvedYear)}&ResultFormat=JSON (API key omitted)\nRetrieved: ${new Date().toISOString()}\nShowing up to 15 table lines; units/scaling: ${JSON.stringify((beaData.Dimensions??[]).filter((d:any)=>/unit|metric/i.test(d.Name??"")))}. Retain the table definition; no automatic unit conversion.`;
     });
   }
 
@@ -533,136 +561,62 @@ export class EconStatsCoreClient {
     }catch(e){return `EIA error: ${e instanceof Error?e.message:"Lookup failed"}`;}
   }
 
-  async worldBankGetData(params: {
-    countryCodes: string[];
-    indicator: string;
-    startYear?: number;
-    endYear?: number;
-  }): Promise<string> {
-    const key = `worldbank:data:countries=${params.countryCodes.join(";")}:indicator=${params.indicator}:start=${params.startYear ?? ""}:end=${params.endYear ?? ""}`;
-    return this.cache.getOrCompute(key, TTL.worldBankData, async () => {
-      const url = new URL(
-        `https://api.worldbank.org/v2/country/${params.countryCodes.join(";")}/indicator/${params.indicator}`,
-      );
-      url.searchParams.set("format", "json");
-      url.searchParams.set("per_page", "100");
-      if (params.startYear) {
-        url.searchParams.set("date", `${params.startYear}:${params.endYear ?? 2025}`);
-      }
 
-      const res = await fetchRetry(url.toString());
-      if (!res.ok) return `World Bank API error: ${res.status}`;
-
-      const data = await res.json();
-      if (!Array.isArray(data) || data.length < 2) return "No data";
-
-      const rows = (data[1] ?? []) as {
-        country: { value: string };
-        date: string;
-        value: number | null;
-      }[];
-      const byCountry = new Map<string, string[]>();
-      for (const row of rows) {
-        if (row.value == null) continue;
-        const country = row.country?.value ?? "Unknown";
-        if (!byCountry.has(country)) byCountry.set(country, []);
-        byCountry.get(country)!.push(`${row.date}: ${row.value}`);
-      }
-
-      return Array.from(byCountry.entries())
-        .map(
-          ([country, observations]) =>
-            `## ${params.indicator} — ${country}\nSource: https://data.worldbank.org/indicator/${params.indicator}\n\n${observations.reverse().join("\n")}`,
-        )
-        .join("\n\n");
-    });
-  }
-
-  async worldBankSearch(query: string): Promise<string> {
-    const key = `worldbank:search:${query.trim().toLowerCase()}`;
-    return this.cache.getOrCompute(key, TTL.worldBankSearch, async () => {
-      const url = new URL("https://api.worldbank.org/v2/indicator");
-      url.searchParams.set("format", "json");
-      url.searchParams.set("per_page", "10");
-      url.searchParams.set("q", query);
-
-      const res = await fetchRetry(url.toString());
-      if (!res.ok) return `World Bank error: ${res.status}`;
-
-      const data = await res.json();
-      if (!Array.isArray(data) || data.length < 2) return "No results";
-
-      return (
-        (data[1] ?? [])
-          .map((indicator: { id: string; name: string }) => `${indicator.id}: ${indicator.name}`)
-          .join("\n") || "No results"
-      );
-    });
-  }
-
-  async ecbGetData(params: {
-    flowRef: string;
-    key: string;
-    startPeriod?: string;
-    endPeriod?: string;
-  }): Promise<string> {
-    const cacheKey = `ecb:data:flow=${params.flowRef}:key=${params.key}:start=${params.startPeriod ?? ""}:end=${params.endPeriod ?? ""}`;
-    return this.cache.getOrCompute(cacheKey, TTL.ecbData, async () => {
-      const url = new URL(`https://data-api.ecb.europa.eu/service/data/${params.flowRef}/${params.key}`);
-      url.searchParams.set("format", "jsondata");
-      if (params.startPeriod) url.searchParams.set("startPeriod", params.startPeriod);
-      if (params.endPeriod) url.searchParams.set("endPeriod", params.endPeriod);
-
-      const res = await fetchRetry(url.toString(), {
-        headers: { Accept: "application/json" },
+  async worldBankGetData(params:{countryCodes:string[];indicator:string;startYear?:number;endYear?:number}):Promise<string>{
+    return this.legacyCall("WORLD_BANK",async()=>{
+      const url=worldBankUrl(params);
+      return this.cache.getOrCompute(`worldbank:data:v3:${url}`,TTL.worldBankData,async()=>{
+        const metaUrl=new URL(`https://api.worldbank.org/v2/indicator/${params.indicator}?format=json&source=2&per_page=100`);
+        const meta=await this.cache.getOrCompute(`worldbank:definition:v3:${metaUrl}`,TTL.worldBankData,async()=>{
+          const result=await worldBankPages(metaUrl),definition=result.rows.find((r:any)=>r.id===params.indicator);
+          if(!definition)legacyFailure("WORLD_BANK","request_rejected","Indicator is not in World Development Indicators (source 2).");return definition;
+        });
+        const page=await worldBankPages(url);return formatWorldBank(page.rows,meta,url,page.updated,page.pages);
       });
-      if (!res.ok) return `ECB API error: ${res.status}`;
-
-      const data = await res.json();
-      const dataset = data?.dataSets?.[0];
-      if (!dataset?.series) return "No ECB data";
-
-      const timeDim = data?.structure?.dimensions?.observation?.find(
-        (dimension: { id: string }) => dimension.id === "TIME_PERIOD",
-      );
-      const times: string[] = timeDim?.values?.map((value: { id: string }) => value.id) ?? [];
-
-      return Object.entries(dataset.series)
-        .map(([, seriesData]) => {
-          const series = seriesData as { observations: Record<string, [number]> };
-          const lines = Object.entries(series.observations ?? {})
-            .map(([idx, values]) => `${times[Number(idx)] ?? idx}: ${values[0]}`)
-            .join("\n");
-          return `## ECB: ${params.flowRef}/${params.key}\n${lines}`;
-        })
-        .join("\n\n");
+    });
+  }
+  async worldBankSearch(query:string):Promise<string>{
+    return this.legacyCall("WORLD_BANK",async()=>{
+      const url=new URL("https://api.worldbank.org/v2/indicator?format=json&source=2&per_page=1000");
+      const catalogue=await this.cache.getOrCompute("worldbank:catalog:v3",TTL.worldBankSearch,()=>worldBankPages(url));
+      const terms=query.toLowerCase().split(/\s+/).filter(Boolean);
+      const matches=catalogue.rows.filter((r:any)=>terms.every(t=>`${r.id} ${r.name} ${r.sourceNote??""}`.toLowerCase().includes(t)));
+      const score=(r:any)=>(String(r.name).toLowerCase().replace(/[^a-z0-9]+/g," ").trim()===terms.join(" ")?1000:0)+terms.reduce((s,t)=>s+(`${r.id} ${r.name}`.toLowerCase().includes(t)?10:0),0);
+      matches.sort((a:any,b:any)=>score(b)-score(a)||a.id.localeCompare(b.id));
+      return `${matches.slice(0,30).map((r:any)=>`${r.id}: ${r.name}`).join("\n")||"No matching WDI indicators."}\nShowing ${Math.min(30,matches.length)} of ${matches.length} matches across the complete downloaded WDI catalogue (${catalogue.pages} pages).\nSource: ${url}\nCatalogue updated: ${catalogue.updated}`;
+    });
+  }
+  async ecbGetData(params:{flowRef:string;key:string;startPeriod?:string;endPeriod?:string}):Promise<string>{
+    return this.legacyCall("ECB",async()=>{
+      const url=ecbUrl(params);
+      return this.cache.getOrCompute(`ecb:data:v3:${url}`,TTL.ecbData,async()=>formatEcb(await checkedJson(url,{headers:{Accept:"application/json"}}),url));
     });
   }
 
-  async inflationAdjust(
+  private async inflationAdjustUnsafe(
     amount: number,
     fromDate: string,
     toDate: string,
   ): Promise<string> {
-    if (!this.env.FRED_KEY) return "FRED_API_KEY not configured";
+    if (!this.env.FRED_KEY) throw new AccessError("FRED","missing_key","FRED_API_KEY is not configured.");
 
     const key = `inflation:adjust:${amount}:from=${fromDate}:to=${toDate}`;
     return this.cache.getOrCompute(key, TTL.inflationAdjust, async () => {
       const [fromRes, toRes] = await Promise.all([
-        fetchRetry(
+        checkedJson(
           `https://api.stlouisfed.org/fred/series/observations?series_id=CPIAUCNS&api_key=${this.env.FRED_KEY}&file_type=json&observation_start=${fromDate}&observation_end=${fromDate}&limit=1`,
         ),
-        fetchRetry(
+        checkedJson(
           `https://api.stlouisfed.org/fred/series/observations?series_id=CPIAUCNS&api_key=${this.env.FRED_KEY}&file_type=json&observation_start=${toDate}&observation_end=${toDate}&limit=1`,
         ),
       ]);
 
-      const fromData = await fromRes.json();
-      const toData = await toRes.json();
+      const fromData = fromRes;
+      const toData = toRes;
       const fromCpi = parseFloat(fromData.observations?.[0]?.value);
       const toCpi = parseFloat(toData.observations?.[0]?.value);
       if (isNaN(fromCpi) || isNaN(toCpi)) {
-        return "CPI data not available for requested dates";
+        legacyFailure("FRED","request_rejected","CPI data not available for requested dates.");
       }
 
       const adjusted = amount * (toCpi / fromCpi);
@@ -671,8 +625,8 @@ export class EconStatsCoreClient {
     });
   }
 
-  async checkReleaseCalendar(): Promise<string> {
-    if (!this.env.FRED_KEY) return "FRED_API_KEY not configured";
+  private async checkReleaseCalendarUnsafe(): Promise<string> {
+    if (!this.env.FRED_KEY) throw new AccessError("FRED","missing_key","FRED_API_KEY is not configured.");
 
     const key = `fred:release-calendar:${new Date().toISOString().slice(0, 10)}`;
     return this.cache.getOrCompute(key, TTL.releaseCalendar, async () => {
@@ -689,16 +643,16 @@ export class EconStatsCoreClient {
 
       for (const release of releases) {
         try {
-          const res = await fetchRetry(
+          const res = await checkedJson(
             `https://api.stlouisfed.org/fred/release/dates?release_id=${release.id}&api_key=${this.env.FRED_KEY}&file_type=json&sort_order=desc&limit=3`,
           );
-          const data = await res.json();
+          const data = res;
           const dates = data.release_dates?.map((item: { date: string }) => item.date) ?? [];
           const isToday = dates.includes(today);
           results.push(
             `${release.name}: last=${dates[0] ?? "?"}${isToday ? ` ** RELEASED TODAY — use ${release.source} direct **` : ""}`,
           );
-        } catch {}
+        } catch(error) {throw error;}
       }
 
       return `Today: ${today}\n\n${results.join("\n")}`;

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import {resetAccessState} from "../src/core/access";
 import { gzipSync } from "node:zlib";
 import { buildEurostatDataUrl, buildEurostatStructureUrl, formatEurostatDatasets, formatEurostatStructure, formatEurostatJson, validateEurostatFilters, requestEurostat } from "../src/core/eurostat";
 import { EconStatsCoreClient } from "../src/core/client";
@@ -91,6 +92,7 @@ test("catalogue failures are not cached, and searches share a successful downloa
  let calls=0;globalThis.fetch=(async()=>{calls++;return calls===1 ? new Response("limited",{status:429}) : new Response(tsv);}) as typeof fetch;
  const client=new EconStatsCoreClient({FRED_KEY:undefined,BLS_KEY:undefined,BEA_KEY:undefined});
  expect(await client.eurostatListDatasets("inflation")).toContain("Eurostat error: Eurostat rate limit");
+ expect(await client.eurostatListDatasets("inflation")).toContain("cooldown");expect(calls).toBe(1);resetAccessState();
  expect(await client.eurostatListDatasets("inflation")).toContain("2 matches");
  expect(await client.eurostatListDatasets("prc_hicp_minr")).toContain("1 matches");expect(calls).toBe(2);
 });
@@ -107,6 +109,7 @@ test("successful data are cached; API failures are not",async()=>{
  }) as typeof fetch;
  const client=new EconStatsCoreClient({FRED_KEY:undefined,BLS_KEY:undefined,BEA_KEY:undefined});
  expect(await client.eurostatGetData(params)).toContain("Eurostat error: Eurostat rate limit");
+ expect(await client.eurostatGetData(params)).toContain("cooldown");expect(dataCalls).toBe(1);resetAccessState();
  expect(await client.eurostatGetData(params)).toContain("2026-02: 1.8");
  expect(await client.eurostatGetData(params)).toContain("2026-02: 1.8");expect(dataCalls).toBe(2);
 });

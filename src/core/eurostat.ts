@@ -1,4 +1,5 @@
 import { parse } from "csv-parse/sync";
+import {providerFetch} from "./access";
 import { XMLParser } from "fast-xml-parser";
 import { gunzipSync } from "node:zlib";
 
@@ -166,7 +167,7 @@ export function formatEurostatJson(data: any, url: URL, params: EurostatDataPara
 }
 
 export async function requestEurostat(url: string | URL, timeoutMs = 40000): Promise<string> {
-  const res = await fetch(url,{signal:AbortSignal.timeout(timeoutMs)});
+  const res = await providerFetch(url,{signal:AbortSignal.timeout(timeoutMs)});
   if (res.status===202) throw new Error("Eurostat queued this large query. Narrow the filters and date range; no observations returned yet.");
   if (res.status===429) throw new Error("Eurostat rate limit reached. Retry later; no observations returned.");
   if (res.status===404) throw new Error("Eurostat dataset or selection not found. Recheck dataset discovery and filters.");

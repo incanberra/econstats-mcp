@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import {resetAccessState} from "../src/core/access";
 import { buildOecdDataUrl, buildOecdStructureUrl, formatOecdCsv, formatOecdDatasets, formatOecdStructure } from "../src/core/oecd";
 import { EconStatsCoreClient } from "../src/core/client";
 
@@ -97,6 +98,7 @@ test("rate-limit failures are not retried or cached; successful repeated data ar
   const client=new EconStatsCoreClient({FRED_KEY:undefined,BLS_KEY:undefined,BEA_KEY:undefined});
   expect(await client.oecdGetData(params)).toContain("OECD error: OECD rate limit");
   expect(calls).toBe(1);
+  expect(await client.oecdGetData(params)).toContain("cooldown");expect(calls).toBe(1);resetAccessState();
   expect(await client.oecdGetData(params)).toContain("2024-03: 3.4");
   expect(await client.oecdGetData(params)).toContain("2024-03: 3.4");
   expect(calls).toBe(2);

@@ -1,4 +1,5 @@
 import {afterEach,describe,expect,test} from "bun:test";
+import {resetAccessState} from "../src/core/access";
 import {buildBisDataUrl,buildBisStructureUrl,formatBisDatasets,formatBisStructure,getBisDefinition,validateBisKey,formatBisCsv,requestBis} from "../src/core/bis";
 import {EconStatsCoreClient} from "../src/core/client";
 const params={datasetId:"WS_CBPOL",seriesKey:"M.US+GB",limit:2};
@@ -91,6 +92,7 @@ test("API failures are not cached; observations pin versions and then reuse cach
  }) as typeof fetch;
  const c=new EconStatsCoreClient({FRED_KEY:undefined,BLS_KEY:undefined,BEA_KEY:undefined});
  expect(await c.bisGetData(params)).toContain("BIS error: BIS rate limit");
+ expect(await c.bisGetData(params)).toContain("cooldown");expect(dataCalls).toBe(1);resetAccessState();
  expect(await c.bisGetData(params)).toContain("2026-03: 3.5");await c.bisGetData(params);expect(dataCalls).toBe(2);
 });
 test("invalid codes never download observations and large-query errors are actionable",async()=>{

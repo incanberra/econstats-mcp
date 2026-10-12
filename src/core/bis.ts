@@ -1,4 +1,5 @@
 import { parse } from "csv-parse/sync";
+import {providerFetch} from "./access";
 import { XMLParser } from "fast-xml-parser";
 
 const BASE = "https://stats.bis.org/api/v2";
@@ -146,7 +147,7 @@ export function formatBisCsv(csv: string, url: URL, params: BisDataParams, def: 
   return `${output || "No numeric BIS observations for this selection."}\n${missing} missing observations omitted; missing values are not zero.\n\nSource: Bank for International Settlements (BIS)\nURL: ${url}\nData portal: https://data.bis.org/topics\nRetrieved: ${new Date().toISOString()}\nRetain units, UNIT_MULT (power of ten), base periods, adjustments, compilation notes and breaks. Cite the dataset, series key, observation date and exact query URL. Country coverage and latest dates can differ. This API returns current revised data, not historical vintages.`;
 }
 export async function requestBis(url: string | URL): Promise<string> {
-  const res = await fetch(url,{signal:AbortSignal.timeout(35000)});
+  const res = await providerFetch(url,{signal:AbortSignal.timeout(35000)});
   if (res.status===429) throw new Error(`BIS rate limit reached. Retry later${res.headers.get("Retry-After") ? `; Retry-After: ${res.headers.get("Retry-After")}` : ""}.`);
   if (res.status===404) throw new Error("BIS dataset or selection not found. Recheck discovery, version and key.");
   if (res.status===413 || res.status===202) throw new Error("BIS query is too large or queued. Narrow the key and period range.");

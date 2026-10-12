@@ -19,7 +19,7 @@ import { z } from "zod";
 import { EconStatsCoreClient } from "./core/client";
 import { MEASURES, SOURCES } from "./core/selection";
 
-function txt(text: string) { return { content: [{ type: "text" as const, text }] }; }
+function txt(text: string) { return { content: [{ type: "text" as const, text }],...(/^(?:FRED|BLS|BEA|WORLD_BANK|ECB|IMF|OECD|Eurostat|BIS|EIA) error:/.test(text)?{isError:true}:{}) }; }
 function imfTxt(text: string) { return { ...txt(text), ...(text.startsWith("IMF error:") ? { isError: true } : {}) }; }
 function oecdTxt(text: string) { return { ...txt(text), ...(text.startsWith("OECD error:") ? { isError: true } : {}) }; }
 function eurostatTxt(text: string) { return { ...txt(text), ...(text.startsWith("Eurostat error:") ? { isError: true } : {}) }; }
@@ -31,7 +31,7 @@ const client = new EconStatsCoreClient();
 
 const server = new McpServer({
   name: "econstats",
-  version: "2.5.0",
+  version: "2.6.0",
   instructions: `You are an expert economic analyst. Plain English in, cited analysis out.
 
 HARD RULES:
@@ -77,6 +77,13 @@ T10Y2Y (yield curve), MORTGAGE30US (30yr mortgage), HOUST (housing starts),
 CSUSHPINSA (Case-Shiller), SP500 (S&P 500), JTSJOL (job openings), JTSQUR (quits rate),
 CES0500000003 (avg hourly earnings), RSAFS (retail sales), PSAVERT (savings rate).`,
 });
+
+server.tool(
+  "connection_health",
+  "Inspect key readiness, saved connection status, request budgets and provider cooldowns. probe=false makes no upstream requests and does not claim live connectivity. probe=true performs a live access check for up to 3 explicitly selected sources, consumes budgets and bypasses data caches. Never returns credentials. A healthy endpoint is not proof of dataset coverage or freshness.",
+  {sources:z.array(z.enum(SOURCES)).min(1).max(10).optional(),probe:z.boolean().default(false)},
+  async({sources,probe})=>{try{return txt(await client.connectionHealth(sources,probe));}catch{return {...txt("Connection health error: choose valid sources; live probes support at most 3 sources per call."),isError:true};}}
+);
 
 server.tool(
   "select_source",
