@@ -1,6 +1,7 @@
 import { createLayeredCache, type LayeredCache } from "./cache";
 import { fetchRetry } from "./http";
 import { buildImfDataUrl, fetchImfData, fetchImfDatasets, fetchImfStructure, type ImfDataParams } from "./imf";
+import { OECD_CATALOG_URL, buildOecdDataUrl, buildOecdStructureUrl, formatOecdCsv, formatOecdDatasets, formatOecdStructure, requestOecd, type OecdDataParams } from "./oecd";
 
 type FredUnits = "lin" | "pc1" | "pch" | "ch1" | "chg";
 
@@ -16,6 +17,8 @@ const TTL = {
   blsLookup: 30 * 24 * 60 * 60,
   beaData: 12 * 60 * 60,
   imfData: 24 * 60 * 60,
+  oecdData: 24 * 60 * 60,
+  oecdMetadata: 7 * 24 * 60 * 60,
   worldBankData: 7 * 24 * 60 * 60,
   worldBankSearch: 7 * 24 * 60 * 60,
   ecbData: 24 * 60 * 60,
@@ -328,6 +331,43 @@ export class EconStatsCoreClient {
       return await this.cache.getOrCompute(`imf:structure:v1:${key}`, TTL.imfData, () => fetchImfStructure(databaseId, dimensionId, query));
     } catch (error) {
       return `IMF error: ${error instanceof Error ? error.message : "Request failed"}`;
+    }
+  }
+
+  async oecdListDatasets(query?: string, offset = 0, limit = 20): Promise<string> {
+    try {
+      // Cache the catalogue once; different searches share the same upstream download.
+      const xml = await this.cache.getOrCompute("oecd:catalog:v1", TTL.oecdMetadata, async () => {
+        const text = await requestOecd(OECD_CATALOG_URL, true);
+        formatOecdDatasets(text); // Reject malformed responses before caching.
+        return text;
+      });
+      return formatOecdDatasets(xml, query, offset, limit);
+    } catch (error) {
+      return `OECD error: ${error instanceof Error ? error.message : "Request failed"}`;
+    }
+  }
+
+  async oecdGetStructure(datasetId: string, version?: string, dimensionId?: string, query?: string): Promise<string> {
+    try {
+      const url = buildOecdStructureUrl(datasetId, version);
+      const xml = await this.cache.getOrCompute(`oecd:structure:v1:${url}`, TTL.oecdMetadata, async () => {
+        const text = await requestOecd(url, true);
+        formatOecdStructure(text, datasetId, version);
+        return text;
+      });
+      return formatOecdStructure(xml, datasetId, version, dimensionId, query);
+    } catch (error) {
+      return `OECD error: ${error instanceof Error ? error.message : "Request failed"}`;
+    }
+  }
+
+  async oecdGetData(params: OecdDataParams): Promise<string> {
+    try {
+      const url = buildOecdDataUrl(params);
+      return await this.cache.getOrCompute(`oecd:data:v1:${url}:limit=${params.limit ?? 36}`, TTL.oecdData, async () => formatOecdCsv(await requestOecd(url), url, params.limit));
+    } catch (error) {
+      return `OECD error: ${error instanceof Error ? error.message : "Request failed"}`;
     }
   }
 

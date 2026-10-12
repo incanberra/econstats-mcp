@@ -3,7 +3,7 @@
  * EconStats MCP Server v2
  *
  * Economic data tools with methodology guide.
- * FRED, BLS, BEA, IMF, World Bank, ECB + inflation adjustment.
+ * FRED, BLS, BEA, IMF, OECD, World Bank, ECB + inflation adjustment.
  *
  * Usage:
  *   bunx econstats-mcp          (stdio, for Claude Desktop/Code)
@@ -20,13 +20,14 @@ import { EconStatsCoreClient } from "./core/client";
 
 function txt(text: string) { return { content: [{ type: "text" as const, text }] }; }
 function imfTxt(text: string) { return { ...txt(text), ...(text.startsWith("IMF error:") ? { isError: true } : {}) }; }
+function oecdTxt(text: string) { return { ...txt(text), ...(text.startsWith("OECD error:") ? { isError: true } : {}) }; }
 const client = new EconStatsCoreClient();
 
 // ── Server ──────────────────────────────────────────────────────────────
 
 const server = new McpServer({
   name: "econstats",
-  version: "2.0.1",
+  version: "2.1.0",
   instructions: `You are an expert economic analyst. Plain English in, cited analysis out.
 
 HARD RULES:
@@ -42,6 +43,7 @@ SOURCE ROUTING:
 - GDP detail, state GDP → bea_get_data
 - International → imf_list_datasets, imf_get_structure, then imf_get_data with current dataset codes. IFS was split into topic datasets.
 - International (long-run) → worldbank_get_data
+- OECD comparisons, productivity, labour markets → oecd_list_datasets, oecd_get_structure, then oecd_get_data. Always inspect dataset dimensions and definitions first.
 - Euro area → ecb_get_data
 - "What is $X worth today?" → inflation_adjust
 - Release day (jobs, CPI, GDP) → check_release_calendar, then BLS/BEA direct
@@ -53,6 +55,7 @@ METHODOLOGY (what makes this different):
 - GDP: always real (GDPC1). Quarterly figures are annualized. Advance estimates get revised.
 - "Real wages" has multiple measures — explain which you're using.
 - BLS data values are index levels with YoY annotations. Charts plot the level.
+- OECD returns exact units, adjustment and transformation labels. Do not confuse national CPI/CPIH/HICP or annual growth with period-on-period growth. Respect different country coverage and observation dates.
 
 COMMON FRED IDS:
 PAYEMS (nonfarm payrolls), UNRATE (unemployment), U6RATE (broad), LNS12300060 (prime-age EPOP),
@@ -172,6 +175,45 @@ server.tool(
       limit,
     }));
   }
+);
+
+// ── OECD ────────────────────────────────────────────────────────────────
+
+server.tool(
+  "oecd_list_datasets",
+  "Search OECD's current Data Explorer catalogue by topic or dataset code. Use before fetching OECD GDP, productivity, inflation, labour-market or other comparisons. Results return agency,dataset and version. No API key required; cached searches share one catalogue download.",
+  {
+    query: z.string().optional().describe("Keywords, e.g. inflation, unemployment, productivity, GDP"),
+    offset: z.number().int().min(0).default(0).describe("Skip this many matching datasets"),
+    limit: z.number().int().min(1).max(50).default(20),
+  },
+  async ({ query, offset, limit }) => oecdTxt(await client.oecdListDatasets(query, offset, limit))
+);
+
+server.tool(
+  "oecd_get_structure",
+  "Inspect an OECD dataset's exact series-key dimension order and code labels. Call with dimension_id and query to find units, countries, adjustment or transformations. Structure codes do not guarantee available observations. Do not guess dimension positions or interpret CPI, CPIH and HICP as identical.",
+  {
+    dataset_id: z.string().describe("agency,dataset from discovery, e.g. OECD.SDD.TPS,DSD_PRICES@DF_PRICES_ALL"),
+    version: z.string().optional().describe("Dataset version from discovery; defaults to latest"),
+    dimension_id: z.string().optional().describe("e.g. REF_AREA, UNIT_MEASURE or TRANSFORMATION"),
+    query: z.string().optional().describe("Filter code labels, e.g. United Kingdom or growth rate"),
+  },
+  async ({ dataset_id, version, dimension_id, query }) => oecdTxt(await client.oecdGetStructure(dataset_id, version, dimension_id, query))
+);
+
+server.tool(
+  "oecd_get_data",
+  "Fetch OECD SDMX data after inspecting oecd_get_structure. Specify every dimension explicitly; combine codes with +. Returns latest observations per series, exact dimension labels, units, scaling, status flags, source URL and retrieval date. Missing values are not zero. For large datasets that block latest-observation queries, supply start_period and end_period. No key required. OECD limits downloads to 60/hour; repeated queries are cached and errors are not cached.",
+  {
+    dataset_id: z.string().describe("agency,dataset from discovery"),
+    version: z.string().optional().describe("Dataset version; defaults to latest"),
+    series_key: z.string().describe("Exact ordered dimensions from structure, e.g. USA+GBR.M.N.CPI.PA._T.N.GY for DSD_PRICES@DF_PRICES_ALL. No wildcard dimensions."),
+    start_period: z.string().optional().describe("Inclusive start, e.g. 2025-01 or 2024-Q1"),
+    end_period: z.string().optional().describe("Inclusive end, e.g. 2026-08"),
+    limit: z.number().int().min(1).max(120).default(36).describe("Latest observations per series within the requested range"),
+  },
+  async ({ dataset_id, version, series_key, start_period, end_period, limit }) => oecdTxt(await client.oecdGetData({datasetId:dataset_id,version,seriesKey:series_key,startPeriod:start_period,endPeriod:end_period,limit}))
 );
 
 // ── World Bank ──────────────────────────────────────────────────────────
