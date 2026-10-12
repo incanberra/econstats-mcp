@@ -3,7 +3,7 @@
  * EconStats MCP Server v2
  *
  * Economic data tools with methodology guide.
- * FRED, BLS, BEA, IMF, OECD, World Bank, ECB + inflation adjustment.
+ * FRED, BLS, BEA, IMF, OECD, Eurostat, World Bank, ECB + inflation adjustment.
  *
  * Usage:
  *   bunx econstats-mcp          (stdio, for Claude Desktop/Code)
@@ -21,13 +21,14 @@ import { EconStatsCoreClient } from "./core/client";
 function txt(text: string) { return { content: [{ type: "text" as const, text }] }; }
 function imfTxt(text: string) { return { ...txt(text), ...(text.startsWith("IMF error:") ? { isError: true } : {}) }; }
 function oecdTxt(text: string) { return { ...txt(text), ...(text.startsWith("OECD error:") ? { isError: true } : {}) }; }
+function eurostatTxt(text: string) { return { ...txt(text), ...(text.startsWith("Eurostat error:") ? { isError: true } : {}) }; }
 const client = new EconStatsCoreClient();
 
 // ── Server ──────────────────────────────────────────────────────────────
 
 const server = new McpServer({
   name: "econstats",
-  version: "2.1.0",
+  version: "2.2.0",
   instructions: `You are an expert economic analyst. Plain English in, cited analysis out.
 
 HARD RULES:
@@ -44,6 +45,7 @@ SOURCE ROUTING:
 - International → imf_list_datasets, imf_get_structure, then imf_get_data with current dataset codes. IFS was split into topic datasets.
 - International (long-run) → worldbank_get_data
 - OECD comparisons, productivity, labour markets → oecd_list_datasets, oecd_get_structure, then oecd_get_data. Always inspect dataset dimensions and definitions first.
+- Detailed European statistics → eurostat_list_datasets, eurostat_get_structure, eurostat_get_data. Use current datasets and explicit non-time filters; check coverage and dataset notes for discontinued series.
 - Euro area → ecb_get_data
 - "What is $X worth today?" → inflation_adjust
 - Release day (jobs, CPI, GDP) → check_release_calendar, then BLS/BEA direct
@@ -214,6 +216,43 @@ server.tool(
     limit: z.number().int().min(1).max(120).default(36).describe("Latest observations per series within the requested range"),
   },
   async ({ dataset_id, version, series_key, start_period, end_period, limit }) => oecdTxt(await client.oecdGetData({datasetId:dataset_id,version,seriesKey:series_key,startPeriod:start_period,endPeriod:end_period,limit}))
+);
+
+// ── Eurostat ────────────────────────────────────────────────────────────
+
+server.tool(
+  "eurostat_list_datasets",
+  "Search the current Eurostat catalogue for European inflation, GDP, unemployment and other official statistics. Returns dataset codes, coverage and update dates, with pagination. Check coverage: some older datasets are discontinued or replaced. No API key required.",
+  {
+    query: z.string().optional().describe("Keywords or dataset code, e.g. inflation, GDP, unemployment, prc_hicp_minr"),
+    offset: z.number().int().min(0).default(0),
+    limit: z.number().int().min(1).max(50).default(20),
+  },
+  async ({ query, offset, limit }) => eurostatTxt(await client.eurostatListDatasets(query,offset,limit))
+);
+
+server.tool(
+  "eurostat_get_structure",
+  "Inspect a Eurostat dataset's required non-time filters and code labels, coverage, notes and update date. Use dimension_id and query to find countries, units, adjustments or components. Select annual/monthly growth rates explicitly for inflation. Do not assume old and current HICP classifications use the same component codes.",
+  {
+    dataset_id: z.string().describe("Dataset code from discovery, e.g. prc_hicp_minr, namq_10_gdp, une_rt_m"),
+    dimension_id: z.string().optional().describe("Filter a dimension, e.g. unit, geo, coicop18 or s_adj"),
+    query: z.string().optional().describe("Filter code labels, e.g. annual rate or Germany"),
+  },
+  async ({ dataset_id, dimension_id, query }) => eurostatTxt(await client.eurostatGetStructure(dataset_id,dimension_id,query))
+);
+
+server.tool(
+  "eurostat_get_data",
+  "Fetch Eurostat observations with exact series definitions, units, status flags, coverage, update/retrieval dates and citation URLs. First inspect eurostat_get_structure, then supply explicit code arrays for EVERY non-time dimension. Missing values are not zero. limit selects the latest time positions (some countries may have missing observations); period bounds are inclusive. Main Eurostat datasets only; separate DS-/Comext and asynchronous bulk downloads are not supported. No key required.",
+  {
+    dataset_id: z.string().describe("Eurostat dataset code, e.g. prc_hicp_minr"),
+    filters: z.record(z.string(),z.array(z.string()).min(1).max(50)).describe("Every non-time dimension mapped to exact code arrays. HICP example: {freq:['M'],unit:['RCH_A'],coicop18:['TOTAL'],geo:['DE','FR']}"),
+    start_period: z.string().optional().describe("Inclusive start, e.g. 2025-01, 2024-Q1 or 2020"),
+    end_period: z.string().optional().describe("Inclusive end in the same frequency, e.g. 2026-08"),
+    limit: z.number().int().min(1).max(120).default(36).describe("Latest time positions; at most this many numeric observations shown per series"),
+  },
+  async ({ dataset_id, filters, start_period, end_period, limit }) => eurostatTxt(await client.eurostatGetData({datasetId:dataset_id,filters,startPeriod:start_period,endPeriod:end_period,limit}))
 );
 
 // ── World Bank ──────────────────────────────────────────────────────────

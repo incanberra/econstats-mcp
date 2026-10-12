@@ -2,6 +2,7 @@ import { createLayeredCache, type LayeredCache } from "./cache";
 import { fetchRetry } from "./http";
 import { buildImfDataUrl, fetchImfData, fetchImfDatasets, fetchImfStructure, type ImfDataParams } from "./imf";
 import { OECD_CATALOG_URL, buildOecdDataUrl, buildOecdStructureUrl, formatOecdCsv, formatOecdDatasets, formatOecdStructure, requestOecd, type OecdDataParams } from "./oecd";
+import { EUROSTAT_CATALOG_URL, buildEurostatDataUrl, buildEurostatStructureUrl, formatEurostatDatasets, formatEurostatStructure, formatEurostatJson, validateEurostatFilters, requestEurostat, type EurostatDataParams } from "./eurostat";
 
 type FredUnits = "lin" | "pc1" | "pch" | "ch1" | "chg";
 
@@ -19,6 +20,8 @@ const TTL = {
   imfData: 24 * 60 * 60,
   oecdData: 24 * 60 * 60,
   oecdMetadata: 7 * 24 * 60 * 60,
+  eurostatData: 6 * 60 * 60,
+  eurostatMetadata: 24 * 60 * 60,
   worldBankData: 7 * 24 * 60 * 60,
   worldBankSearch: 7 * 24 * 60 * 60,
   ecbData: 24 * 60 * 60,
@@ -368,6 +371,49 @@ export class EconStatsCoreClient {
       return await this.cache.getOrCompute(`oecd:data:v1:${url}:limit=${params.limit ?? 36}`, TTL.oecdData, async () => formatOecdCsv(await requestOecd(url), url, params.limit));
     } catch (error) {
       return `OECD error: ${error instanceof Error ? error.message : "Request failed"}`;
+    }
+  }
+
+  async eurostatListDatasets(query?: string, offset = 0, limit = 20): Promise<string> {
+    try {
+      const tsv = await this.cache.getOrCompute("eurostat:catalog:v1", TTL.eurostatMetadata, async () => {
+        // The complete English catalogue is slower than filtered metadata/data.
+        const text = await requestEurostat(EUROSTAT_CATALOG_URL,55000);
+        formatEurostatDatasets(text);
+        return text;
+      });
+      return formatEurostatDatasets(tsv,query,offset,limit);
+    } catch (error) {
+      return `Eurostat error: ${error instanceof Error ? error.message : "Request failed"}`;
+    }
+  }
+
+  private async eurostatStructureXml(datasetId: string): Promise<string> {
+    const url = buildEurostatStructureUrl(datasetId);
+    return this.cache.getOrCompute(`eurostat:structure:v1:${url}`,TTL.eurostatMetadata,async()=>{
+      const text = await requestEurostat(url);
+      formatEurostatStructure(text,datasetId);
+      return text;
+    });
+  }
+
+  async eurostatGetStructure(datasetId: string, dimensionId?: string, query?: string): Promise<string> {
+    try {
+      return formatEurostatStructure(await this.eurostatStructureXml(datasetId),datasetId,dimensionId,query);
+    } catch (error) {
+      return `Eurostat error: ${error instanceof Error ? error.message : "Request failed"}`;
+    }
+  }
+
+  async eurostatGetData(params: EurostatDataParams): Promise<string> {
+    try {
+      const url = buildEurostatDataUrl(params);
+      return await this.cache.getOrCompute(`eurostat:data:v1:${url}:limit=${params.limit??36}`,TTL.eurostatData,async()=>{
+        validateEurostatFilters(await this.eurostatStructureXml(params.datasetId),params);
+        return formatEurostatJson(JSON.parse(await requestEurostat(url)),url,params);
+      });
+    } catch (error) {
+      return `Eurostat error: ${error instanceof Error ? error.message : "Request failed"}`;
     }
   }
 
