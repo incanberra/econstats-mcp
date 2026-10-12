@@ -3,7 +3,7 @@
  * EconStats MCP Server v2
  *
  * Economic data tools with methodology guide.
- * FRED, BLS, BEA, IMF, OECD, Eurostat, World Bank, ECB + inflation adjustment.
+ * FRED, BLS, BEA, IMF, OECD, Eurostat, BIS, World Bank, ECB + inflation adjustment.
  *
  * Usage:
  *   bunx econstats-mcp          (stdio, for Claude Desktop/Code)
@@ -22,13 +22,14 @@ function txt(text: string) { return { content: [{ type: "text" as const, text }]
 function imfTxt(text: string) { return { ...txt(text), ...(text.startsWith("IMF error:") ? { isError: true } : {}) }; }
 function oecdTxt(text: string) { return { ...txt(text), ...(text.startsWith("OECD error:") ? { isError: true } : {}) }; }
 function eurostatTxt(text: string) { return { ...txt(text), ...(text.startsWith("Eurostat error:") ? { isError: true } : {}) }; }
+function bisTxt(text: string) { return { ...txt(text), ...(text.startsWith("BIS error:") ? { isError: true } : {}) }; }
 const client = new EconStatsCoreClient();
 
 // ── Server ──────────────────────────────────────────────────────────────
 
 const server = new McpServer({
   name: "econstats",
-  version: "2.2.0",
+  version: "2.3.0",
   instructions: `You are an expert economic analyst. Plain English in, cited analysis out.
 
 HARD RULES:
@@ -39,6 +40,8 @@ HARD RULES:
 - Don't compute averages or trends in your head — cite specific data points.
 
 SOURCE ROUTING:
+- Honor an explicitly requested source. Otherwise choose by the requested measure, geography, frequency, comparable definitions and latest usable observations; there is no universal best source.
+- Prefer the original statistical producer for release-day or detailed national figures. FRED is convenient redistribution; identify the underlying producer when available. Prefer harmonised definitions for country comparisons.
 - US macro → fred_get_series (check series_id from common IDs below)
 - Granular CPI/employment (metro, industry) → bls_get_series
 - GDP detail, state GDP → bea_get_data
@@ -46,9 +49,12 @@ SOURCE ROUTING:
 - International (long-run) → worldbank_get_data
 - OECD comparisons, productivity, labour markets → oecd_list_datasets, oecd_get_structure, then oecd_get_data. Always inspect dataset dimensions and definitions first.
 - Detailed European statistics → eurostat_list_datasets, eurostat_get_structure, eurostat_get_data. Use current datasets and explicit non-time filters; check coverage and dataset notes for discontinued series.
-- Euro area → ecb_get_data
+- Credit, debt service, international banking, property prices and effective exchange rates across countries → bis_list_datasets, bis_get_structure, bis_get_data. Validate sector, valuation, adjustment, units, real/nominal definitions and breaks.
+- ECB monetary policy, euro-area monetary aggregates and bank statistics → ecb_get_data; European inflation and national accounts → Eurostat, using comparable definitions.
 - "What is $X worth today?" → inflation_adjust
 - Release day (jobs, CPI, GDP) → check_release_calendar, then BLS/BEA direct
+- Inspect metadata and actual coverage before settling on a source. State why it fits and flag stale or missing observations. If it fails, try an appropriate fallback and disclose the change; never silently substitute CPI/CPIH/HICP, national accounts growth conventions, borrower sectors or nominal/real series.
+- For comparisons use common observation periods. Explain differences in definitions or revisions before combining sources. Include dataset/series, units, observation dates, source URL and retrieval date in citations.
 
 METHODOLOGY (what makes this different):
 - "Jobs added?" → use change, not level. "Unemployment?" → consider U-6 alongside U-3.
@@ -253,6 +259,45 @@ server.tool(
     limit: z.number().int().min(1).max(120).default(36).describe("Latest time positions; at most this many numeric observations shown per series"),
   },
   async ({ dataset_id, filters, start_period, end_period, limit }) => eurostatTxt(await client.eurostatGetData({datasetId:dataset_id,filters,startPeriod:start_period,endPeriod:end_period,limit}))
+);
+
+// ── BIS ─────────────────────────────────────────────────────────────────
+
+server.tool(
+  "bis_list_datasets",
+  "Search BIS datasets for cross-country credit, debt service, banking, property prices, policy rates, effective exchange rates and related financial statistics. Returns current WS_ dataset IDs and versions. No API key required.",
+  {
+    query: z.string().optional().describe("Keywords or dataset ID, e.g. credit, debt service, housing, exchange rates, WS_TC"),
+    offset: z.number().int().min(0).default(0),
+    limit: z.number().int().min(1).max(50).default(20),
+  },
+  async ({ query, offset, limit }) => bisTxt(await client.bisListDatasets(query,offset,limit))
+);
+
+server.tool(
+  "bis_get_structure",
+  "Inspect a BIS dataset's ordered key dimensions, code labels and definition. Use dimension_id and query to select country, sector, valuation, unit, real/nominal or basket codes. Codelists do not guarantee observations. Inspect this before bis_get_data.",
+  {
+    dataset_id: z.string().describe("WS_ code from discovery, e.g. WS_TC, WS_DSR, WS_SPP, WS_EER, WS_CBPOL"),
+    version: z.string().optional().describe("Discovered version, or latest (default)"),
+    dimension_id: z.string().optional().describe("Exact dimension name, e.g. REF_AREA, BORROWERS_CTY, UNIT_TYPE"),
+    query: z.string().optional().describe("Filter codes/labels, e.g. United Kingdom or GDP"),
+  },
+  async ({ dataset_id, version, dimension_id, query }) => bisTxt(await client.bisGetStructure(dataset_id,version,dimension_id,query))
+);
+
+server.tool(
+  "bis_get_data",
+  "Fetch BIS observations with exact dimensions, units, status flags, compilation/break notes, retrieval date and citation URL. First inspect bis_get_structure. Specify every key dimension; join alternatives with +. Maximum 50 series. Missing observations are not zero. Returns current revised data; latest dates may differ across countries. No key required.",
+  {
+    dataset_id: z.string().describe("BIS dataset ID, e.g. WS_CBPOL"),
+    version: z.string().optional().describe("Discovered version, or latest (default); citation pins the resolved version"),
+    series_key: z.string().describe("Explicit codes in metadata order, e.g. M.US+GB for monthly central-bank policy rates"),
+    start_period: z.string().optional().describe("Inclusive start YYYY, YYYY-MM, YYYY-Qq, YYYY-Ss or YYYY-MM-DD"),
+    end_period: z.string().optional().describe("Inclusive end period"),
+    limit: z.number().int().min(1).max(120).default(36).describe("Latest observations shown per series, default 36"),
+  },
+  async ({ dataset_id, version, series_key, start_period, end_period, limit }) => bisTxt(await client.bisGetData({datasetId:dataset_id,version,seriesKey:series_key,startPeriod:start_period,endPeriod:end_period,limit}))
 );
 
 // ── World Bank ──────────────────────────────────────────────────────────

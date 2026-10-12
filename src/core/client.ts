@@ -3,6 +3,7 @@ import { fetchRetry } from "./http";
 import { buildImfDataUrl, fetchImfData, fetchImfDatasets, fetchImfStructure, type ImfDataParams } from "./imf";
 import { OECD_CATALOG_URL, buildOecdDataUrl, buildOecdStructureUrl, formatOecdCsv, formatOecdDatasets, formatOecdStructure, requestOecd, type OecdDataParams } from "./oecd";
 import { EUROSTAT_CATALOG_URL, buildEurostatDataUrl, buildEurostatStructureUrl, formatEurostatDatasets, formatEurostatStructure, formatEurostatJson, validateEurostatFilters, requestEurostat, type EurostatDataParams } from "./eurostat";
+import { BIS_CATALOG_URL, buildBisDataUrl, buildBisStructureUrl, formatBisDatasets, formatBisStructure, getBisDefinition, validateBisKey, formatBisCsv, requestBis, type BisDataParams } from "./bis";
 
 type FredUnits = "lin" | "pc1" | "pch" | "ch1" | "chg";
 
@@ -22,6 +23,8 @@ const TTL = {
   oecdMetadata: 7 * 24 * 60 * 60,
   eurostatData: 6 * 60 * 60,
   eurostatMetadata: 24 * 60 * 60,
+  bisData: 6 * 60 * 60,
+  bisMetadata: 7 * 24 * 60 * 60,
   worldBankData: 7 * 24 * 60 * 60,
   worldBankSearch: 7 * 24 * 60 * 60,
   ecbData: 24 * 60 * 60,
@@ -414,6 +417,49 @@ export class EconStatsCoreClient {
       });
     } catch (error) {
       return `Eurostat error: ${error instanceof Error ? error.message : "Request failed"}`;
+    }
+  }
+
+  async bisListDatasets(query?: string, offset = 0, limit = 20): Promise<string> {
+    try {
+      const xml = await this.cache.getOrCompute("bis:catalog:v1",TTL.bisMetadata,async()=>{
+        const text = await requestBis(BIS_CATALOG_URL);
+        formatBisDatasets(text);
+        return text;
+      });
+      return formatBisDatasets(xml,query,offset,limit);
+    } catch (error) {
+      return `BIS error: ${error instanceof Error ? error.message : "Request failed"}`;
+    }
+  }
+
+  private async bisStructureXml(id: string, version?: string): Promise<string> {
+    const url = buildBisStructureUrl(id,version);
+    return this.cache.getOrCompute(`bis:structure:v1:${url}`,TTL.bisMetadata,async()=>{
+      const text = await requestBis(url);
+      getBisDefinition(text,id,version);
+      return text;
+    });
+  }
+
+  async bisGetStructure(id: string, version?: string, dimensionId?: string, query?: string): Promise<string> {
+    try {
+      return formatBisStructure(await this.bisStructureXml(id,version),id,version,dimensionId,query);
+    } catch (error) {
+      return `BIS error: ${error instanceof Error ? error.message : "Request failed"}`;
+    }
+  }
+
+  async bisGetData(params: BisDataParams): Promise<string> {
+    try {
+      buildBisDataUrl(params);
+      const def = getBisDefinition(await this.bisStructureXml(params.datasetId,params.version),params.datasetId,params.version);
+      validateBisKey(def,params.seriesKey);
+      const url = buildBisDataUrl({...params,version:def.version});
+      return await this.cache.getOrCompute(`bis:data:v1:${url}:limit=${params.limit??36}`,TTL.bisData,async()=>
+        formatBisCsv(await requestBis(url),url,params,def));
+    } catch (error) {
+      return `BIS error: ${error instanceof Error ? error.message : "Request failed"}`;
     }
   }
 
