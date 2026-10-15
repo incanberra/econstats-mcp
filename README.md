@@ -177,6 +177,8 @@ codex mcp add econstats --env MCP_PORT=0 --env PORT=0 -- bun --env-file=/absolut
 
 On Windows, use absolute paths to `bun.exe`, `.env`, and `src/index.ts`. Restart Codex after registering or updating the server.
 
+For the existing default Windows installation, run `powershell -ExecutionPolicy Bypass -File scripts/update-installed.ps1` from this branch. The updater checks the expected fork and tracked working-tree changes, uses a fast-forward update, installs locked dependencies, runs type checking/tests and verifies that `.env` was unchanged without displaying it. It stops instead of resetting divergent local work. This helper was syntax-checked; it was not run against the protected installation during this task. The live checks exercised the development checkout.
+
 ### OpenBB
 
 Connect as an MCP server in the OpenBB workspace AI settings.
