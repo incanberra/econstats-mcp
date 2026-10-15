@@ -4,14 +4,13 @@ export async function fetchRetry(
   init?: RequestInit,
 ): Promise<Response> {
   for (let attempt = 0; attempt <= 2; attempt++) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 15000);
+    // Keep the timeout alive while callers consume the body, not just until headers arrive.
+    const timeout=AbortSignal.timeout(15000);
+    const signal=init?.signal?AbortSignal.any([init.signal,timeout]):timeout;
     try {
-      const res = await providerFetch(url, { ...init, signal: controller.signal });
-      clearTimeout(timer);
+      const res = await providerFetch(url, { ...init, signal });
       return res;
     } catch (error) {
-      clearTimeout(timer);
       if (error instanceof AccessError && error.kind==="unavailable" && attempt < 2) {
         await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)));
         continue;

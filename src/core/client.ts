@@ -9,6 +9,11 @@ import { BIS_CATALOG_URL, buildBisDataUrl, buildBisStructureUrl, formatBisDatase
 import {selectionEvidence,eiaObservationResponse} from "./selection-data";
 import {selectSource, type SelectionParams} from "./selection";
 import {buildEiaMetadataUrl,buildEiaDataUrl,validateEiaMetadata,validateEiaSelection,formatEiaRoutes,formatEiaMetadata,formatEiaFacets,formatEiaData,requestEia,type EiaDataParams} from "./eia";
+import {fetchStructured} from './structured-data';
+import {RevisionTracker} from './revisions';
+import {ABS_CATALOG_URL,absCatalogue,absStructure,buildAbsStructureUrl,requestAbs,sdmxDefinition} from './abs';
+import {dataSeries,finishResult} from './result';
+import type {Retrieval} from './selection';
 
 type FredUnits = "lin" | "pc1" | "pch" | "ch1" | "chg";
 
@@ -56,6 +61,7 @@ function cited(source: string, title: string, data: string): string {
 
 export class EconStatsCoreClient {
   private cache: LayeredCache;
+  private revisions=new RevisionTracker();
 
   constructor(
     private env: {FRED_KEY?:string;BLS_KEY?:string;BEA_KEY?:string;EIA_KEY?:string} = {
@@ -90,7 +96,22 @@ export class EconStatsCoreClient {
   }
 
   async selectSource(params: SelectionParams): Promise<string> {
-    return JSON.stringify(await selectSource(params,{FRED:!!this.env.FRED_KEY,BEA:!!this.env.BEA_KEY,EIA:!!this.env.EIA_KEY},r=>selectionEvidence(r,this.env,this.cache)),null,2);
+    return JSON.stringify(await selectSource(params,{FRED:!!this.env.FRED_KEY,BEA:!!this.env.BEA_KEY,EIA:!!this.env.EIA_KEY},async r=>{
+      const e=await selectionEvidence(r,this.env,this.cache);
+      const s=dataSeries(`verified:${e.measure}`,{...e.dimensions,country:e.country},e.urls[0],{frequency:e.frequency,unit:e.unit,unitMultiplier:e.unitMultiplier,adjustment:e.adjustment,transformation:e.transformation,urls:e.urls,notes:e.notes,observations:e.observations.map(o=>({...o,attributes:o.attributes??{}}))});
+      const tracked=await this.revisions.track(finishResult(e.source,{},[s],e.retrievedAt,120));
+      return {...e,revision:tracked.series[0].revision};
+    }),null,2);
+  }
+
+  async getStructuredData(request:Retrieval,fresh=false){return this.revisions.track(await fetchStructured(request,this.env,this.cache,fresh));}
+  async revisionHistory(seriesId:string,limit=10){return this.revisions.history(seriesId,limit);}
+  async absListDatasets(query?:string,offset=0,limit=20){
+    const xml=await this.cache.getOrCompute('abs:catalog:v1',86400,async()=>{const xml=await requestAbs(ABS_CATALOG_URL);absCatalogue(xml);return xml;});return absCatalogue(xml,query,offset,limit);
+  }
+  async absGetStructure(id:string,version?:string,dimensionId?:string,query?:string,offset=0,limit=50){
+    const url=buildAbsStructureUrl(id,version),xml=await this.cache.getOrCompute(`abs:structure:v1:${url}`,86400,async()=>{const xml=await requestAbs(url);sdmxDefinition(xml,id,'ABS',version);return xml;});
+    return absStructure(xml,id,version,dimensionId,query,offset,limit);
   }
 
   private async fredSearchUnsafe(query: string): Promise<string> {

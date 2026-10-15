@@ -1,6 +1,110 @@
 # econstats-mcp
 
-Economic data MCP server with an economist's methodology guide. Connects FRED, BLS, BEA, IMF, OECD, Eurostat, BIS, EIA, World Bank, and ECB to any MCP-compatible client.
+Economic data MCP server with an economist's methodology guide. Connects FRED, BLS, BEA, IMF, OECD, Eurostat, BIS, EIA, World Bank, ECB, and ABS to any MCP-compatible client.
+
+## Version 3: ABS, structured data and observed revisions
+
+All eleven direct observation tools return MCP `structuredContent` using the same
+`schemaVersion: "1.0"` contract. The accompanying text is rendered from those exact
+records. Search/catalogue tools keep their existing interfaces unless noted.
+This is a major version because direct text formatting and BLS presentation changed.
+
+- Result: `source`, original `retrievedAt`, nullable `sourceUpdatedAt`, public query,
+  `series`, coverage counts/truncation and notes.
+- Series: stable `id`, dataset/version, dimensions and labels, frequency, unit,
+  nullable power-of-ten multiplier, adjustment, transformation, attributes,
+  observations, citation URLs and revision status.
+- Observation: period, numeric value or explicit `null`, and provider flags/footnotes.
+- Unknown metadata remain null or `not_reported`. No numeric scaling or harmonisation
+  is inferred. A literal unit label can itself contain scaling: retain that label.
+- BLS direct results contain reported native levels with available calculations in
+  attributes. They are not silently relabelled as YoY inflation/payroll changes.
+  Use `select_source` for those verified transformations. Monthly rows are supported;
+  M13 annual averages are excluded and disclosed. Unsupported frequencies fail safely.
+- BEA's exposed parameter set supports NIPA only. Regional/GDPbyIndustry need separate
+  parameters and are no longer advertised as supported by this interface.
+- Old text-only TypeScript core methods remain compatibility entry points. MCP data
+  handlers use the new structured pipeline; their text is not reparsed into data.
+
+### ABS
+
+Use `abs_list_datasets` → `abs_get_structure` → `abs_get_data`. No key is required.
+The structure tool returns exact dimension order, code labels, a resolved version
+and paginated code lists (`dimension_id`, `query`, `offset`, `limit`). Each data
+key must explicitly specify every dimension, with at most 50 selected series and
+1–120 observations per series. Data queries pin the resolved version in citations.
+
+Recorded live examples, checked 16 October 2026:
+
+| Measure | Dataset/version | Series key |
+| --- | --- | --- |
+| GDP, chain-volume level, SA | ANA_AGG / 1.0.0 | M1.GPM.20.AUS.Q |
+| GDP growth from previous quarter, SA, not annualised | ANA_AGG / 1.0.0 | M2.GPM.20.AUS.Q |
+| All-groups CPI, change from previous year, original | CPI / 2.0.0 | 3.10001.10.50.M |
+| Unemployment rate, persons, total age, SA | LF / 1.0.0 | M13.3.1599.20.AUS.M |
+| Goods credits/debits, current prices, SA | ITGS / 1.2.0 | M1.1000+2000.20.AUS.M |
+
+Goods debits remain negative. These balance-of-payments trade series must not be
+silently substituted for customs merchandise exports/imports. GDP chain-volume
+levels retain native AUD units and available notes; an absent reference year is
+not invented, and no ABS real-GDP-level selector template is registered yet.
+The selector verifies Australian monthly headline CPI, monthly unemployment and
+quarterly unannualised GDP growth. Australian SA GDP is distinct from European
+SCA GDP; the check explicitly preserves this difference. For CPI, the current DSD
+contains no UNIT_MULT: direct output leaves it null; selector evidence explicitly
+explains the basis for using the PCT unit as reported percentage units.
+
+The ABS Data API remains a beta service and may lag published releases. Always
+check returned coverage against the relevant publication when release freshness
+matters. Metadata codes alone do not establish data availability. In the current
+CPI version the monthly key worked; the analogous quarterly key returned no data.
+
+Official references: [ABS API guide](https://www.abs.gov.au/statistics/application-programming-interfaces-apis/data-api-user-guide),
+[request examples](https://www.abs.gov.au/statistics/application-programming-interfaces-apis/data-api-user-guide/worked-examples).
+
+### Revision tracking
+
+Every public data retrieval records a baseline or checks against the latest
+locally observed snapshot. Returned `series[].revision` distinguishes baseline,
+unchanged, changes detected, cached/older replay and unavailable storage.
+Changes distinguish newly available observations, changed historical values,
+missing-to-value/value-to-missing transitions, flags and metadata changes.
+Changes to definition/units start a new comparison baseline; they are not
+misreported as directly comparable numeric revisions.
+
+Use `fresh:true` on a data call to bypass and replace its observation cache, then
+`revision_history` with the returned 64-character series `id`. Normal budgets and
+cooldowns still apply. Cached results retain their original retrieval time and
+never create a new vintage or roll a newer baseline backwards. Narrow query-window
+omissions are not interpreted as withdrawals. Explicit nulls remain observable.
+
+History defaults to `<ECONSTATS_CACHE_DIR>/revisions-v1`, or the default local cache
+root. `ECONSTATS_REVISION_DIR` can choose an explicit history directory independently
+of the data cache. With disk persistence disabled and no explicit revision directory,
+history is in-memory only. Up to 50 changed snapshots per series are retained;
+oldest snapshots are discarded and the count is reported. Historical comparison
+coverage is limited to periods in retained snapshots. File updates are atomic and
+locked across local processes. Storage errors are disclosed without suppressing
+valid retrieved observations or overwriting corrupt history.
+
+This is an archive of what this installation retrieved from now on. It is not an
+official historical release-vintage database, a background monitor or a cross-source
+discrepancy resolver. Verified-selector snapshots use separate derived-series
+identities (`verified:<measure>`) and do not share an identity with native data.
+
+### Validation and review
+
+`bun run typecheck` checks production TypeScript source; `bun test` runs offline
+regressions, official-response fixtures and an SDK tool-schema/initialisation check.
+CI runs both. Live requests are opt-in: after loading your private provider keys,
+run `bun run scripts/check-live.ts <report-directory>`. The report directory must be
+outside the repository. The script creates a persistent runtime cache there, respects
+normal request budgets and never writes keys into reports. Set
+`ECONSTATS_LIVE_TOOLS` to comma-separated tool names for a narrowed rerun.
+The three ABS selector checks also run, using normal evidence caches.
+
+See [the review of PRs 1–8](docs/pr-stack-review-2026-10-16.md) for findings,
+repairs and the recommended merge order. No PR has been merged or published.
 
 ## What makes it different
 
@@ -21,7 +125,7 @@ curl -fsSL https://bun.sh/install | bash
 # Install from this fork; the npm econstats-mcp package is currently unpublished.
 git clone https://github.com/incanberra/econstats-mcp.git
 cd econstats-mcp
-git switch strengthen-source-selection
+git switch add-abs-structured-revisions
 bun install --frozen-lockfile --ignore-scripts
 
 # Save keys for the providers you use in a local .env (excluded from Git).
@@ -86,7 +190,7 @@ Connect as an MCP server in the OpenBB workspace AI settings.
 | `BEA_API_KEY` | Optional | https://apps.bea.gov/API/signup/ (free, for GDP detail) |
 | `EIA_API_KEY` | For EIA | https://www.eia.gov/opendata/register.php (free) |
 
-IMF, OECD, Eurostat, BIS, World Bank, and ECB need no keys.
+IMF, OECD, Eurostat, BIS, World Bank, ECB, and ABS need no keys.
 
 ## Current IMF API
 
@@ -246,7 +350,7 @@ US residential electricity-price example:
 
 Other exact series include Cushing WTI spot (`petroleum/pri/spt`, `series=RWTC`), Henry Hub spot (`natural-gas/pri/fut`, `series=RNGWHHD`), and US regular gasoline, all formulations (`petroleum/pri/gnd`, `series=EMM_EPMR_PTE_NUS_DPG`); each uses the `value` field. Inspect metadata for frequencies and retain reported units. The natural-gas route contains both spot and futures series; the selected code defines the measure.
 
-`start_period`/`end_period` are inclusive; `length` is the total rows per page (1–5000, default 120), **not observations per series**. Use the returned next `offset` to continue; a multi-series page can have different coverage per series. Rows are requested newest first and presented chronologically within each separate series. Reported units, additional labels/status attributes and API warnings are retained. Missing values are omitted and counted rather than treated as zero. Conflicting observations, unexpected facets/frequencies and inconsistent units return MCP errors. Outlook routes (`aeo`, `steo`, `ieo`) are explicitly identified as containing projections/estimates.
+`start_period`/`end_period` are inclusive; `length` is the total rows per page (1–5000, default 120), **not observations per series**. Use the returned next `offset` to continue; a multi-series page can have different coverage per series. Rows are requested newest first and presented chronologically within each separate series. Reported units, additional labels/status attributes and API warnings are retained. Missing values are retained as null in the structured output and counted; they are never treated as zero. Conflicting observations, unexpected facets/frequencies and inconsistent units return MCP errors. Outlook routes (`aeo`, `steo`, `ieo`) are explicitly identified as containing projections/estimates.
 
 Each result cites the exact route, facets, field, frequency, dates and public query URL. API keys are used only in the authenticated request: the API's request echo is discarded, keys are redacted from returned data, and citation/cache URLs omit the key. Errors are not cached. EIA's rate limits return an actionable tool error; no immediate retry is attempted.
 
@@ -282,7 +386,7 @@ The registry is not an exhaustive catalogue search. Some recognised measures/geo
 
 Missing keys, rejected keys, rate limits, local budget exhaustion, outages/timeouts, rejected requests and malformed responses are separate statuses. Keys and authenticated URLs are never included in health output. HTTP 429 starts a provider cooldown using `Retry-After` (seconds or an HTTP date), defaulting to one minute; further uncached calls are stopped locally during that cooldown. Application-level errors such as BLS daily thresholds and BEA credential rejection are also diagnosed. Temporary network/5xx failures in older adapters can be retried at most twice; each attempt consumes budget, while 429/authentication/parameter failures are not immediately retried.
 
-Every provider has a configurable **local hourly request budget**, defaulting to 60 for OECD and 300 for other providers. These are local operational caps, not promises about provider quotas: other applications/IP users and upstream daily limits are not counted. OECD metadata and probes count too, making its cap conservative relative to [OECD's published download limit](https://www.oecd.org/en/data/insights/data-explainers/2024/11/Api-best-practices-and-recommendations.html). Set `ECONSTATS_BUDGET_<PROVIDER>_PER_HOUR` to a nonnegative integer; zero disables that provider's local cap. Provider names are `FRED`, `BLS`, `BEA`, `IMF`, `OECD`, `EUROSTAT`, `BIS`, `EIA`, `WORLD_BANK` and `ECB`.
+Every provider has a configurable **local hourly request budget**, defaulting to 60 for OECD and 300 for other providers. These are local operational caps, not promises about provider quotas: other applications/IP users and upstream daily limits are not counted. OECD metadata and probes count too, making its cap conservative relative to [OECD's published download limit](https://www.oecd.org/en/data/insights/data-explainers/2024/11/Api-best-practices-and-recommendations.html). Set `ECONSTATS_BUDGET_<PROVIDER>_PER_HOUR` to a nonnegative integer; zero disables that provider's local cap. Provider names are `FRED`, `BLS`, `BEA`, `IMF`, `OECD`, `EUROSTAT`, `BIS`, `EIA`, `WORLD_BANK` `ECB` and `ABS`.
 
 Budgets and cooldowns persist under the local cache directory with atomic updates and cross-process locks. They are shared by MCP processes using that directory. A budget-storage failure stops an upstream call rather than allowing untracked requests. Remote hosts/other cache directories have separate budgets; Redis shares data caching, not budget counters. With disk caching disabled, budgets/cooldowns exist only in the current process. Cached valid data remain available during a cooldown and do not consume requests.
 
@@ -294,7 +398,7 @@ Budgets and cooldowns persist under the local cache directory with atomic update
 
 `ecb_get_data` accepts fully specified keys (up to 50 combinations), rejects wildcards, decodes SDMX-JSON dimension/attribute indices, keeps country/series results separate and retains units, power-of-ten scales, observation flags, dates and exact citations. It makes no automatic unit conversion. The supported JSON media header and `format=jsondata` are used together.
 
-FRED/BLS/BEA, World Bank and ECB return MCP tool errors for failed requests or invalid responses. HTTP/application errors are rejected before writing successful-data caches. BLS and BEA citations include retrieval dates; BEA preserves row units/scales and discloses the existing 15-line display cap. BEA's default `LAST5` is resolved to five explicit years. Provider request echoes/private credential fields are removed before legacy JSON is cached.
+FRED/BLS/BEA, World Bank and ECB return MCP tool errors for failed requests or invalid responses. HTTP/application errors are rejected before writing successful-data caches. BLS and BEA citations include retrieval dates; BEA's public structured output preserves row units/scales and every returned line, subject to bounded result-size guards. The old text-only core helper retains its historical display cap for compatibility. BEA's default `LAST5` is resolved to five explicit years. Provider request echoes/private credential fields are removed before legacy JSON is cached.
 
 References: [World Bank pagination and call structures](https://datahelpdesk.worldbank.org/knowledgebase/articles/898581-api-basic-call-structures), [World Bank indicator queries](https://datahelpdesk.worldbank.org/knowledgebase/articles/898599-indicator-api-queries), [ECB API overview](https://data.ecb.europa.eu/help/api/overview).
 
@@ -318,7 +422,7 @@ If you are running a shared MCP endpoint for OpenBB users, set these optional en
 | `ECONSTATS_DISK_CACHE` | Optional | Set `false` to disable local persistence |
 | `PREFETCH_HOT_SERIES` | Optional | Set to `true` only for long-lived hosted processes |
 
-TTL policy is source-aware:
+The new public structured observation pipeline caches FRED results for 15 minutes and other providers for one hour. Explicit refresh replaces that entry. ABS catalogue/structures are cached for 24 hours. Selector evidence has its own original retrieval timestamp. The following TTLs apply to the retained legacy helpers and provider metadata:
 
 - Hot FRED series like `PAYEMS`, `UNRATE`, `CPIAUCSL`, `CPILFESL`, `PCEPILFE`: 15 minutes
 - Standard FRED series: 6 hours

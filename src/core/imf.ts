@@ -65,12 +65,15 @@ export function buildImfDataUrl(params: ImfDataParams): URL {
   if (key.length > 1000 || !/^[A-Z0-9_]+(?:\+[A-Z0-9_]+)*(?:\.[A-Z0-9_]+(?:\+[A-Z0-9_]+)*)+$/.test(key)) {
     throw new Error("Invalid series_key. Specify explicit dimension codes separated by dots; combine codes with +. Wildcard dimensions are not supported.");
   }
+  if(key.split('.').reduce((n,k)=>n*new Set(k.split('+')).size,1)>50)throw new Error('IMF selection exceeds 50 series; narrow the query before downloading.');
   for (const period of [params.startPeriod, params.endPeriod]) {
     if (period && !/^\d{4}(?:-(?:0[1-9]|1[0-2]|M(?:0[1-9]|1[0-2])|Q[1-4]))?$/.test(period)) {
       throw new Error("Invalid period. Use YYYY, YYYY-MM, YYYY-Mmm, or YYYY-Qq.");
     }
   }
   const limit = params.limit ?? 36;
+  const order=(p:string)=>p.replace('-M','-').replace(/-Q([1-4])/,(_,q)=>'-'+String(Number(q)*3).padStart(2,'0'));
+  if(params.startPeriod&&params.endPeriod&&order(params.startPeriod)>order(params.endPeriod))throw new Error('start_period must not be after end_period.');
   if (!Number.isInteger(limit) || limit < 1 || limit > 120) throw new Error("limit must be an integer from 1 to 120.");
   const url = new URL(`${BASE}/data/${dataset.agency},${dataset.id}/${key}`);
   if (params.startPeriod) url.searchParams.set("startPeriod", params.startPeriod);
@@ -93,7 +96,8 @@ export function formatImfCsv(csv: string, url: URL, limit = 36): string {
   const dimensions = columns.slice(0, columns.indexOf("TIME_PERIOD")).filter(c => !["DATAFLOW", "STRUCTURE", "STRUCTURE_ID", "ACTION"].includes(c));
   const grouped = new Map<string, { metadata: string; observations: Map<string, string> }>();
   for (const row of rows) {
-    if (!row.OBS_VALUE?.trim() || !Number.isFinite(Number(row.OBS_VALUE))) continue;
+    if (!row.OBS_VALUE?.trim()) continue;
+    if(!Number.isFinite(Number(row.OBS_VALUE)))throw new Error('IMF returned a non-numeric observation.');
     const id = [row.DATAFLOW ?? row.STRUCTURE_ID, ...dimensions.map(c => `${c}=${row[c]}`)].join(" | ");
     const metadata = ["UNIT", "SCALE", "REFERENCE_PERIOD", "COMMON_REFERENCE_PERIOD"].filter(c => row[c] !== undefined && row[c] !== "").map(c => `${c}=${row[c]}`).join(", ");
     if (!grouped.has(id)) grouped.set(id, { metadata, observations: new Map() });

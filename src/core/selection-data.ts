@@ -10,6 +10,8 @@ import {buildEurostatDataUrl,buildEurostatStructureUrl,validateEurostatFilters,f
 import {buildEiaDataUrl,buildEiaMetadataUrl,validateEiaSelection,formatEiaData,requestEia} from './eia';
 import {type SeriesEvidence,type Observation,type Adjustment,requireEvidence as check,numeric,frequency,finishEvidence,expectedTransformation} from './evidence';
 import type {Retrieval,Measure,Source} from './selection';
+import {buildAbsDataUrl,buildAbsStructureUrl,requestAbs,sdmxDefinition,validateSdmxKey,parseAbsCsv,type SdmxDefinition} from './abs';
+import type {DataResult} from './result';
 
 type Keys={FRED_KEY?:string;BLS_KEY?:string;BEA_KEY?:string;EIA_KEY?:string};
 const iso3=(code:string)=>code==='U2'?'EA':iso.alpha2ToAlpha3(code)||code;
@@ -197,11 +199,33 @@ export async function eiaObservationResponse(cache:LayeredCache,url:URL,p:any,me
   });
 }
 
+export function parseAbsEvidence(data:DataResult,def:SdmxDefinition):SeriesEvidence {
+  check(data.source==='ABS'&&data.series.length===1,'definition_mismatch','Expected one ABS series.');
+  const s=data.series[0],d=s.dimensions;
+  const cpi=def.id==='CPI'&&d.MEASURE==='3'&&d.INDEX==='10001'&&d.TSEST==='10'&&d.REGION==='50'&&d.FREQ==='M';
+  const labour=def.id==='LF'&&d.MEASURE==='M13'&&d.SEX==='3'&&d.AGE==='1599'&&d.TSEST==='20'&&d.REGION==='AUS'&&d.FREQ==='M';
+  const gdp=def.id==='ANA_AGG'&&d.MEASURE==='M2'&&d.DATA_ITEM==='GPM'&&d.TSEST==='20'&&d.REGION==='AUS'&&d.FREQ==='Q';
+  check(cpi||labour||gdp,'definition_unconfirmed','No registered ABS definition for this exact series.');
+  check(cpi?/percentage change from previous year/i.test(s.labels.MEASURE)&&/^All groups CPI$/i.test(s.labels.INDEX):labour?/^Unemployment rate$/i.test(s.labels.MEASURE)&&/^Persons$/i.test(s.labels.SEX)&&/^Total \(age\)$/i.test(s.labels.AGE):/^Chain volume measures - Percentage changes$/i.test(s.labels.MEASURE)&&/^Gross domestic product$/i.test(s.labels.DATA_ITEM),'definition_mismatch','ABS code labels no longer confirm the registered definition.');
+  check(s.unit==='PCT','unit_mismatch','ABS did not report percentage units.');
+  // CPI's current DSD has no multiplier attribute. The explicit PCT unit is already percent.
+  const nativePercent=cpi&&!def.attributeIds.includes('UNIT_MULT')&&s.unitMultiplier===null;
+  check(s.unitMultiplier===0||nativePercent,'unit_unconfirmed','ABS percentage scaling is not confirmed.');
+  const e=base('ABS',cpi?'headline_cpi_yoy':labour?'unemployment_rate':'real_gdp_growth_qoq','AUS',d.FREQ,'percent',cpi?'NSA':'SA',d,s.observations.filter(o=>o.value!==null).map(o=>({period:o.period,value:o.value!,attributes:o.attributes})),s.urls[0]);
+  e.retrievedAt=data.retrievedAt;e.notes.push(...data.notes,...s.notes);
+  if(nativePercent)e.notes.push('Scaling basis: ABS CPI DSD has no UNIT_MULT attribute; the explicit PCT unit is percent as reported. No numeric scaling was applied.');
+  return e;
+}
+
 export async function selectionEvidence(r:Retrieval,keys:Keys,cache:LayeredCache):Promise<SeriesEvidence> {
   const a=r.arguments,cacheKey=`selection:evidence:v2:${JSON.stringify(r)}`;
   return cache.getOrCompute(cacheKey,r.tool==='fred_get_series'?900:3600,async()=>{
     let e:SeriesEvidence;
-    if(r.tool==='fred_get_series'){
+    if(r.tool==='abs_get_data'){
+      const p={datasetId:a.dataset_id,seriesKey:a.series_key,limit:a.limit},su=buildAbsStructureUrl(p.datasetId);
+      const xml=await cache.getOrCompute(`abs:structure:v1:${su}`,86400,()=>requestAbs(su)),def=sdmxDefinition(xml,p.datasetId,'ABS');validateSdmxKey(def,p.seriesKey);
+      const url=buildAbsDataUrl({...p,version:def.version});e=parseAbsEvidence(parseAbsCsv(await requestAbs(url),url,p,def,new Date().toISOString()),def);
+    }else if(r.tool==='fred_get_series'){
       check(keys.FRED_KEY,'missing_key','FRED API key is not configured.');
       const url=(endpoint:string)=>new URL(`https://api.stlouisfed.org/fred/${endpoint}?series_id=${encodeURIComponent(a.series_id)}&file_type=json&api_key=${encodeURIComponent(keys.FRED_KEY!)}`);
       const obs=url('series/observations');obs.searchParams.set('units',a.units);obs.searchParams.set('limit',String(a.limit));obs.searchParams.set('sort_order','desc');

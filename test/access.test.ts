@@ -6,7 +6,18 @@ import {RequestGovernor,providerFetch,accessGovernor,AccessError} from "../src/c
 import {FileCacheBackend,LayeredCache,MemoryCacheBackend} from "../src/core/cache";
 import {connectionHealth} from "../src/core/health";
 import {checkedJson} from "../src/core/legacy";
+import {fetchRetry} from '../src/core/http';
 const originalFetch=globalThis.fetch;afterEach(()=>{globalThis.fetch=originalFetch;});
+
+test('shared fetch preserves caller cancellation after response headers arrive',async()=>{
+ const controller=new AbortController();let requestSignal:AbortSignal|undefined;
+ globalThis.fetch=(async(_input:any,init:any)=>{requestSignal=init.signal;return new Response('ok');}) as typeof fetch;
+ await fetchRetry('https://api.worldbank.org/v2/country/US',{signal:controller.signal});expect(requestSignal!.aborted).toBe(false);controller.abort();expect(requestSignal!.aborted).toBe(true);
+});
+test('failed response bodies return an unavailable error without partial data or raw messages',async()=>{
+ globalThis.fetch=(async()=>({ok:true,status:200,text:async()=>{throw Error('private_secret');}} as unknown as Response)) as unknown as typeof fetch;
+ try{await checkedJson('https://api.worldbank.org/v2/country/US');throw Error('expected failure');}catch(e){expect(e).toBeInstanceOf(AccessError);expect((e as AccessError).kind).toBe('unavailable');expect(String(e)).not.toContain('private_secret');}
+});
 test("request budget survives new instances and concurrent reservations cannot overspend",async()=>{
  const dir=await mkdtemp(join(tmpdir(),"econstats-budget-")),a=new RequestGovernor(dir,{EIA:2}),b=new RequestGovernor(dir,{EIA:2});
  const results=await Promise.allSettled([a.reserve("EIA"),b.reserve("EIA"),a.reserve("EIA"),b.reserve("EIA")]);

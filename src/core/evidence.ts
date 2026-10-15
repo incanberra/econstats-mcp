@@ -8,6 +8,7 @@ export interface SeriesEvidence {
   unit:string;unitMultiplier:number;adjustment:Adjustment;transformation:string;
   dimensions:Record<string,string>;observations:Observation[];
   urls:string[];retrievedAt:string;notes:string[];
+  revision?:Record<string,unknown>;
 }
 export class VerificationError extends Error {
   constructor(public reason:string,message:string){super(message);}
@@ -60,8 +61,8 @@ export function finishEvidence(e:SeriesEvidence,limit=120):SeriesEvidence {
 export function expectedTransformation(measure:Measure):string {
   return /cpi.*yoy|hicp_yoy/.test(measure)?'yoy_percent_change':measure==='real_gdp_growth_annualized'?'qoq_annualized_percent_change':measure==='real_gdp_growth_qoq'?'qoq_percent_change':measure==='nonfarm_jobs_change'?'period_change':'level';
 }
-export function expectedAdjustment(measure:Measure):Adjustment|undefined {
-  return /cpi.*yoy|hicp_yoy/.test(measure)?'NSA':/real_gdp/.test(measure)?measure==='real_gdp_growth_qoq'?'SCA':'SA':/unemployment_rate|nonfarm_jobs_change/.test(measure)?'SA':undefined;
+export function expectedAdjustment(measure:Measure,source?:Source):Adjustment|undefined {
+  return /cpi.*yoy|hicp_yoy/.test(measure)?'NSA':/real_gdp/.test(measure)?measure==='real_gdp_growth_qoq'&&source!=='ABS'?'SCA':'SA':/unemployment_rate|nonfarm_jobs_change/.test(measure)?'SA':undefined;
 }
 export function comparisonSignature(e:SeriesEvidence):string {
   return JSON.stringify([e.measure,e.frequency,e.unit,e.unitMultiplier,e.adjustment,e.transformation]);

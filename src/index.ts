@@ -18,6 +18,8 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { EconStatsCoreClient } from "./core/client";
 import { MEASURES, SOURCES } from "./core/selection";
+import {renderResult} from "./core/result";
+import {AccessError} from "./core/access";
 
 function txt(text: string) { return { content: [{ type: "text" as const, text }],...(/^(?:FRED|BLS|BEA|WORLD_BANK|ECB|IMF|OECD|Eurostat|BIS|EIA) error:/.test(text)?{isError:true}:{}) }; }
 function imfTxt(text: string) { return { ...txt(text), ...(text.startsWith("IMF error:") ? { isError: true } : {}) }; }
@@ -26,12 +28,21 @@ function eurostatTxt(text: string) { return { ...txt(text), ...(text.startsWith(
 function bisTxt(text: string) { return { ...txt(text), ...(text.startsWith("BIS error:") ? { isError: true } : {}) }; }
 function eiaTxt(text: string) { return { ...txt(text), ...(text.startsWith("EIA error:") ? { isError: true } : {}) }; }
 const client = new EconStatsCoreClient();
-
+async function data(tool:string,args:Record<string,any>){
+ const {fresh=false,...parameters}=args;
+ try{const result=await client.getStructuredData({tool,arguments:parameters},fresh);return {content:[{type:"text" as const,text:renderResult(result)}],structuredContent:result as unknown as Record<string,unknown>};}
+ catch(error){return {isError:true,content:[{type:"text" as const,text:error instanceof AccessError?error.message:"Data retrieval failed validation. Check dataset metadata, parameters, credentials and provider availability; no data were inferred."}]};}
+}
+async function jsonResult(work:()=>Promise<any>){
+ try{const result=await work();return {content:[{type:"text" as const,text:JSON.stringify(result,null,2)}],structuredContent:result};}
+ catch(error){return {isError:true,content:[{type:"text" as const,text:error instanceof AccessError?error.message:"Request failed. Check metadata, parameters and local storage."}]};}
+}
 // ── Server ──────────────────────────────────────────────────────────────
 
 const server = new McpServer({
   name: "econstats",
-  version: "2.7.0",
+  version: "3.0.0",
+}, {
   instructions: `You are an expert economic analyst. Plain English in, cited analysis out.
 
 HARD RULES:
@@ -45,9 +56,12 @@ SOURCE ROUTING:
 - For source recommendations, call select_source with an exact measure and country codes. It verifies structured provider records and returns definitions, aligned observations, citations, and rejection reasons. Never treat an unverified plan as confirmed data or silently override a preferred source. If no exact match is verified, refine the definition or use provider discovery tools.
 - Honor an explicitly requested source. Otherwise choose by the requested measure, geography, frequency, comparable definitions and latest usable observations; there is no universal best source.
 - Prefer the original statistical producer for release-day or detailed national figures. FRED is convenient redistribution; identify the underlying producer when available. Prefer harmonised definitions for country comparisons.
+- Australian data: abs_list_datasets, abs_get_structure, abs_get_data. Validate codes, adjustment, units and publication freshness.
+- Direct data tools return structuredContent schemaVersion 1.0 and text rendered from the same observations. Unknown units/scaling stay null; native values are not silently transformed.
+- Use fresh=true for an explicit revision check, then revision_history with the returned series_id. These are observed snapshots, not official publication vintages.
 - US macro → fred_get_series (check series_id from common IDs below)
 - Granular CPI/employment (metro, industry) → bls_get_series
-- GDP detail, state GDP → bea_get_data
+- US NIPA GDP detail → bea_get_data. State/regional and GDP-by-industry APIs are not exposed by this tool.
 - International → imf_list_datasets, imf_get_structure, then imf_get_data with current dataset codes. IFS was split into topic datasets.
 - International (long-run) → worldbank_get_data
 - OECD comparisons, productivity, labour markets → oecd_list_datasets, oecd_get_structure, then oecd_get_data. Always inspect dataset dimensions and definitions first.
@@ -119,28 +133,26 @@ server.tool(
   "fred_get_series",
   "Fetch FRED time series data with optional transformations. CRITICAL: For inflation indexes (CPIAUCSL, PCEPILFE, PPI), use units='pc1' to get year-over-year % change — raw index levels are meaningless to users. For employment (PAYEMS), use units='chg' to get monthly change in jobs. For rates (UNRATE, FEDFUNDS, DGS10), use units='lin' (default) since they're already in useful units. GDP: always use real GDP (GDPC1), never nominal.",
   {
+    fresh:z.boolean().default(false).describe("Bypass observation cache to check revisions; budgets and cooldowns still apply."),
     series_id: z.string().describe("FRED series ID, e.g. CPIAUCSL, UNRATE, GDPC1"),
     limit: z.number().default(36).describe("Observations (default 36 = 3 years monthly)"),
     units: z.enum(["lin", "pc1", "pch", "ch1", "chg"]).default("lin").describe("lin=levels, pc1=YoY%, pch=MoM%, chg=change"),
   },
-  async ({ series_id, limit, units }) => {
-    return txt(await client.fredGetSeries(series_id, limit, units));
-  }
+  async (args) => data("fred_get_series",args)
 );
 
 // ── BLS ─────────────────────────────────────────────────────────────────
 
 server.tool(
   "bls_get_series",
-  "Fetch data direct from Bureau of Labor Statistics. Use instead of FRED when: (1) you need data on release day (BLS publishes at 8:30am ET, FRED lags 30-60 min), (2) you need metro-area CPI or state employment detail FRED doesn't have. Returns pre-computed YoY% for CPI/PPI indexes and monthly change for employment series automatically. For labor market analysis, consider fetching multiple series: unemployment (LNS14000000) + prime-age EPOP (LNS12300060) + job openings (JTS000000000000000JOL) gives a much fuller picture than unemployment alone.",
+  "Fetch data direct from Bureau of Labor Statistics. Use instead of FRED when: (1) you need data on release day (BLS publishes at 8:30am ET, FRED lags 30-60 min), (2) you need metro-area CPI or state employment detail FRED doesn't have. Returns native reported levels, footnotes and available provider calculations in structured observation attributes. Use select_source for verified CPI YoY or payroll changes. For labor market analysis, consider fetching multiple series: unemployment (LNS14000000) + prime-age EPOP (LNS12300060) + job openings (JTS000000000000000JOL) gives a much fuller picture than unemployment alone.",
   {
+    fresh:z.boolean().default(false).describe("Bypass observation cache to check revisions; budgets and cooldowns still apply."),
     series_ids: z.array(z.string()).min(1).max(50).describe("BLS series IDs, e.g. ['CUSR0000SA0', 'CES0000000001']"),
     start_year: z.string().optional().describe("Start year, e.g. '2022'"),
     end_year: z.string().optional().describe("End year, e.g. '2026'"),
   },
-  async ({ series_ids, start_year, end_year }) => {
-    return txt(await client.blsGetSeries(series_ids, start_year, end_year));
-  }
+  async (args) => data("bls_get_series",args)
 );
 
 server.tool(
@@ -156,16 +168,15 @@ server.tool(
 
 server.tool(
   "bea_get_data",
-  "Fetch BEA national accounts data (GDP components, personal income, trade). Most GDP data is also on FRED — use this for detailed NIPA table breakdowns.",
+  "Fetch BEA NIPA national accounts tables with every returned line, units, scaling and notes. Regional and GDPbyIndustry are not supported by this parameter set.",
   {
-    dataset: z.enum(["NIPA", "Regional", "GDPbyIndustry"]).describe("NIPA for GDP, Regional for state data"),
-    table_name: z.string().describe("e.g. T10101 (GDP), T10106 (contributions), SAGDP2N (state GDP)"),
+    fresh:z.boolean().default(false).describe("Bypass observation cache to check revisions; budgets and cooldowns still apply."),
+    dataset: z.enum(["NIPA"]).describe("NIPA tables. Regional and GDPbyIndustry require parameters not exposed by this interface."),
+    table_name: z.string().describe("e.g. T10101 (annualised real GDP growth), T10106 (real GDP level)"),
     frequency: z.enum(["A", "Q", "M"]).default("Q"),
     year: z.string().default("LAST5"),
   },
-  async ({ dataset, table_name, frequency, year }) => {
-    return txt(await client.beaGetData(dataset, table_name, frequency, year));
-  }
+  async (args) => data("bea_get_data",args)
 );
 
 // ── IMF ─────────────────────────────────────────────────────────────────
@@ -192,6 +203,7 @@ server.tool(
   "imf_get_data",
   "Fetch the current IMF SDMX API. First inspect imf_get_structure, then supply series_key in that dataset's exact dimension order (usually ISO3 countries). For CPI convenience queries, supply country_codes (ISO2/ISO3), frequency, and indicator: PCPI_PC_CP_A_PT=YoY inflation, PCPI_IX=index, PCPI_PC_PP_PT=period-over-period change. These CPI shortcuts also accept database_id=IFS for compatibility. Other legacy IFS indicators cannot be translated automatically. Results retain units, scale, reference periods, and observation-status flags. No key required.",
   {
+    fresh:z.boolean().default(false).describe("Bypass observation cache to check revisions; budgets and cooldowns still apply."),
     database_id: z.string().describe("Current dataset, e.g. CPI, ER, ANEA, QNEA, IMTS, BOP, IMF.RES:WEO. IFS supported only for the listed CPI shortcuts."),
     series_key: z.string().optional().describe("Full current key, e.g. USA+GBR.CPI._T.YOY_PCH_PA_PT.M. Use this OR country_codes/indicator."),
     frequency: z.enum(["A", "Q", "M"]).optional().describe("For CPI convenience queries only; defaults to A. A full series_key includes its own frequency."),
@@ -201,18 +213,7 @@ server.tool(
     end_period: z.string().optional(),
     limit: z.number().int().min(1).max(120).default(36).describe("Latest observations per series, within the requested range"),
   },
-  async ({ database_id, series_key, frequency, country_codes, indicator, start_period, end_period, limit }) => {
-    return imfTxt(await client.imfGetData({
-      databaseId: database_id,
-      seriesKey: series_key,
-      frequency,
-      countryCodes: country_codes,
-      indicator,
-      startPeriod: start_period,
-      endPeriod: end_period,
-      limit,
-    }));
-  }
+  async (args) => data("imf_get_data",args)
 );
 
 // ── OECD ────────────────────────────────────────────────────────────────
@@ -244,6 +245,7 @@ server.tool(
   "oecd_get_data",
   "Fetch OECD SDMX data after inspecting oecd_get_structure. Specify every dimension explicitly; combine codes with +. Returns latest observations per series, exact dimension labels, units, scaling, status flags, source URL and retrieval date. Missing values are not zero. For large datasets that block latest-observation queries, supply start_period and end_period. No key required. OECD limits downloads to 60/hour; repeated queries are cached and errors are not cached.",
   {
+    fresh:z.boolean().default(false).describe("Bypass observation cache to check revisions; budgets and cooldowns still apply."),
     dataset_id: z.string().describe("agency,dataset from discovery"),
     version: z.string().optional().describe("Dataset version; defaults to latest"),
     series_key: z.string().describe("Exact ordered dimensions from structure, e.g. USA+GBR.M.N.CPI.PA._T.N.GY for DSD_PRICES@DF_PRICES_ALL. No wildcard dimensions."),
@@ -251,7 +253,7 @@ server.tool(
     end_period: z.string().optional().describe("Inclusive end, e.g. 2026-08"),
     limit: z.number().int().min(1).max(120).default(36).describe("Latest observations per series within the requested range"),
   },
-  async ({ dataset_id, version, series_key, start_period, end_period, limit }) => oecdTxt(await client.oecdGetData({datasetId:dataset_id,version,seriesKey:series_key,startPeriod:start_period,endPeriod:end_period,limit}))
+  async (args) => data("oecd_get_data",args)
 );
 
 // ── Eurostat ────────────────────────────────────────────────────────────
@@ -282,13 +284,14 @@ server.tool(
   "eurostat_get_data",
   "Fetch Eurostat observations with exact series definitions, units, status flags, coverage, update/retrieval dates and citation URLs. First inspect eurostat_get_structure, then supply explicit code arrays for EVERY non-time dimension. Missing values are not zero. limit selects the latest time positions (some countries may have missing observations); period bounds are inclusive. Main Eurostat datasets only; separate DS-/Comext and asynchronous bulk downloads are not supported. No key required.",
   {
+    fresh:z.boolean().default(false).describe("Bypass observation cache to check revisions; budgets and cooldowns still apply."),
     dataset_id: z.string().describe("Eurostat dataset code, e.g. prc_hicp_minr"),
     filters: z.record(z.string(),z.array(z.string()).min(1).max(50)).describe("Every non-time dimension mapped to exact code arrays. HICP example: {freq:['M'],unit:['RCH_A'],coicop18:['TOTAL'],geo:['DE','FR']}"),
     start_period: z.string().optional().describe("Inclusive start, e.g. 2025-01, 2024-Q1 or 2020"),
     end_period: z.string().optional().describe("Inclusive end in the same frequency, e.g. 2026-08"),
     limit: z.number().int().min(1).max(120).default(36).describe("Latest time positions; at most this many numeric observations shown per series"),
   },
-  async ({ dataset_id, filters, start_period, end_period, limit }) => eurostatTxt(await client.eurostatGetData({datasetId:dataset_id,filters,startPeriod:start_period,endPeriod:end_period,limit}))
+  async (args) => data("eurostat_get_data",args)
 );
 
 // ── BIS ─────────────────────────────────────────────────────────────────
@@ -320,6 +323,7 @@ server.tool(
   "bis_get_data",
   "Fetch BIS observations with exact dimensions, units, status flags, compilation/break notes, retrieval date and citation URL. First inspect bis_get_structure. Specify every key dimension; join alternatives with +. Maximum 50 series. Missing observations are not zero. Returns current revised data; latest dates may differ across countries. No key required.",
   {
+    fresh:z.boolean().default(false).describe("Bypass observation cache to check revisions; budgets and cooldowns still apply."),
     dataset_id: z.string().describe("BIS dataset ID, e.g. WS_CBPOL"),
     version: z.string().optional().describe("Discovered version, or latest (default); citation pins the resolved version"),
     series_key: z.string().describe("Explicit codes in metadata order, e.g. M.US+GB for monthly central-bank policy rates"),
@@ -327,7 +331,7 @@ server.tool(
     end_period: z.string().optional().describe("Inclusive end period"),
     limit: z.number().int().min(1).max(120).default(36).describe("Latest observations shown per series, default 36"),
   },
-  async ({ dataset_id, version, series_key, start_period, end_period, limit }) => bisTxt(await client.bisGetData({datasetId:dataset_id,version,seriesKey:series_key,startPeriod:start_period,endPeriod:end_period,limit}))
+  async (args) => data("bis_get_data",args)
 );
 
 // ── EIA ─────────────────────────────────────────────────────────────────
@@ -346,8 +350,8 @@ server.tool(
 server.tool(
   "eia_get_data",
   "Fetch EIA API v2 data with reported units, exact facets, dates and citation query (API key omitted). Inspect metadata first. Select every facet, or explicit series codes on routes with a series facet. length is total rows per page, not observations per series; use offset to continue. Keep states/sectors/products and spot/futures distinct. Outlook routes contain projections. Requires EIA_API_KEY.",
-  {route:z.string(),frequency:z.string(),data_fields:z.array(z.string()).min(1).max(5),facets:z.record(z.string(),z.array(z.string()).min(1).max(50)),start_period:z.string().optional(),end_period:z.string().optional(),length:z.number().int().min(1).max(5000).default(120),offset:z.number().int().min(0).default(0)},
-  async({route,frequency,data_fields,facets,start_period,end_period,length,offset})=>eiaTxt(await client.eiaGetData({route,frequency,fields:data_fields,facets,startPeriod:start_period,endPeriod:end_period,length,offset}))
+  {fresh:z.boolean().default(false).describe("Bypass observation cache to check revisions; budgets and cooldowns still apply."),route:z.string(),frequency:z.string(),data_fields:z.array(z.string()).min(1).max(5),facets:z.record(z.string(),z.array(z.string()).min(1).max(50)),start_period:z.string().optional(),end_period:z.string().optional(),length:z.number().int().min(1).max(5000).default(120),offset:z.number().int().min(0).default(0)},
+  async (args) => data("eia_get_data",args)
 );
 
 // ── World Bank ──────────────────────────────────────────────────────────
@@ -356,19 +360,13 @@ server.tool(
   "worldbank_get_data",
   "Fetch World Bank development indicators. Best for long-run cross-country comparisons (annual data, may lag 1-2 years). Covers 200+ countries. Common indicators: NY.GDP.MKTP.KD.ZG (GDP growth %), FP.CPI.TOTL.ZG (inflation %), SL.UEM.TOTL.ZS (unemployment %), SP.POP.TOTL (population). Use 'WLD' for world aggregate, 'OED' for OECD. For recent/current data, use imf_get_data instead.",
   {
+    fresh:z.boolean().default(false).describe("Bypass observation cache to check revisions; budgets and cooldowns still apply."),
     country_codes: z.array(z.string()).describe("ISO2/ISO3 codes. 'WLD'=world, 'OED'=OECD"),
     indicator: z.string().describe("e.g. NY.GDP.MKTP.KD.ZG (GDP growth), FP.CPI.TOTL.ZG (inflation)"),
     start_year: z.number().optional(),
     end_year: z.number().optional(),
   },
-  async ({ country_codes, indicator, start_year, end_year }) => {
-    return txt(await client.worldBankGetData({
-      countryCodes: country_codes,
-      indicator,
-      startYear: start_year,
-      endYear: end_year,
-    }));
-  }
+  async (args) => data("worldbank_get_data",args)
 );
 
 server.tool(
@@ -386,19 +384,13 @@ server.tool(
   "ecb_get_data",
   "Fetch ECB data. Euro area rates, HICP inflation, money supply, exchange rates.",
   {
+    fresh:z.boolean().default(false).describe("Bypass observation cache to check revisions; budgets and cooldowns still apply."),
     flow_ref: z.string().describe("EXR (exchange rates), FM (financial), ICP (HICP), BSI (money supply)"),
     key: z.string().describe("e.g. 'M.U2.N.000000.4.ANR' for euro HICP YoY"),
     start_period: z.string().optional(),
     end_period: z.string().optional(),
   },
-  async ({ flow_ref, key, start_period, end_period }) => {
-    return txt(await client.ecbGetData({
-      flowRef: flow_ref,
-      key,
-      startPeriod: start_period,
-      endPeriod: end_period,
-    }));
-  }
+  async (args) => data("ecb_get_data",args)
 );
 
 // ── Inflation Adjust ────────────────────────────────────────────────────
@@ -428,6 +420,19 @@ server.tool(
 );
 
 // ── Start ───────────────────────────────────────────────────────────────
+
+server.tool("abs_list_datasets","Search the ABS Data API catalogue. Free, no API key. Inspect structures and publication freshness before retrieving data.",
+  {query:z.string().optional(),offset:z.number().int().min(0).default(0),limit:z.number().int().min(1).max(50).default(20)},
+  async({query,offset,limit})=>jsonResult(()=>client.absListDatasets(query,offset,limit)));
+server.tool("abs_get_structure","Inspect ABS dataset version, ordered dimensions and code labels. Paginate code lists. Codes do not guarantee observations.",
+  {dataset_id:z.string(),version:z.string().optional(),dimension_id:z.string().optional(),query:z.string().optional(),offset:z.number().int().min(0).default(0),limit:z.number().int().min(1).max(100).default(50)},
+  async({dataset_id,version,dimension_id,query,offset,limit})=>jsonResult(()=>client.absGetStructure(dataset_id,version,dimension_id,query,offset,limit)));
+server.tool("abs_get_data","Fetch exact ABS series after inspecting abs_get_structure. Returns common structured data, native units, flags, source query, original retrieval time and revision changes. Pin the discovered version. API freshness may lag the publication. No automatic annualisation or scaling.",
+  {dataset_id:z.string(),version:z.string().optional(),series_key:z.string(),start_period:z.string().optional(),end_period:z.string().optional(),limit:z.number().int().min(1).max(120).default(36),fresh:z.boolean().default(false)},
+  async(args)=>data("abs_get_data",args));
+server.tool("revision_history","Read locally observed snapshots and changes for a series_id returned by a data tool. Does not fetch upstream data or reconstruct official release vintages. Retains up to 50 changed snapshots per series by default.",
+  {series_id:z.string().regex(/^[a-f0-9]{64}$/),limit:z.number().int().min(1).max(50).default(10)},
+  async({series_id,limit})=>jsonResult(()=>client.revisionHistory(series_id,limit)));
 
 const PORT = parseInt(process.env.MCP_PORT || process.env.PORT || "0");
 
@@ -468,7 +473,7 @@ if (PORT > 0) {
   });
 
   httpServer.listen(PORT, () => {
-    console.error(`EconStats MCP v2 running on http://localhost:${PORT} (Streamable HTTP)`);
+    console.error(`EconStats MCP v3 running on http://localhost:${PORT} (Streamable HTTP)`);
     if (process.env.PREFETCH_HOT_SERIES === "true") {
       client.prefetchReleaseDaySeries();
     }
@@ -477,7 +482,7 @@ if (PORT > 0) {
   // Stdio mode — for Claude Desktop/Code
   const transport = new StdioServerTransport();
   server.connect(transport).then(() => {
-    console.error("EconStats MCP v2 running on stdio");
+    console.error("EconStats MCP v3 running on stdio");
     if (process.env.PREFETCH_HOT_SERIES === "true") {
       client.prefetchReleaseDaySeries();
     }
