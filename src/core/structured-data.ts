@@ -158,9 +158,9 @@ export async function fetchStructured(r:Retrieval,keys:Keys,cache:LayeredCache,f
       return parseBeaData(await checkedJson(auth),{...a,year},url,new Date().toISOString());
     }
     if(r.tool==='imf_get_data'||r.tool==='oecd_get_data'){
-      const oecd=r.tool==='oecd_get_data',p={datasetId:a.dataset_id,databaseId:a.database_id,version:a.version,seriesKey:a.series_key,countryCodes:a.country_codes,indicator:a.indicator,frequency:a.frequency,startPeriod:a.start_period,endPeriod:a.end_period,limit:a.limit};
+      const oecd=r.tool==='oecd_get_data',p={datasetId:a.dataset_id,databaseId:a.database_id,space:a.space,version:a.version,seriesKey:a.series_key,countryCodes:a.country_codes,indicator:a.indicator,frequency:a.frequency,startPeriod:a.start_period,endPeriod:a.end_period,limit:a.limit};
       const url=oecd?buildOecdDataUrl(p):buildImfDataUrl(p),flow=url.pathname.split('/data/')[1].split('/')[0].split(','),key=url.pathname.split('/').at(-1)!;
-      const su=oecd?buildOecdStructureUrl(a.dataset_id,a.version):new URL(`https://api.imf.org/external/sdmx/2.1/dataflow/${flow[0]}/${flow[1]}/latest?references=all`);
+      const su=oecd?buildOecdStructureUrl(a.dataset_id,a.version,a.space):new URL(`https://api.imf.org/external/sdmx/2.1/dataflow/${flow[0]}/${flow[1]}/latest?references=all`);
       const xml=await cache.getOrCompute(`structured:definition:v1:${su}`,86400,async()=>oecd?requestOecd(su,true):(await(await fetchRetry(su,{headers:{Accept:'application/vnd.sdmx.structure+xml;version=2.1'}})).text()));
       const def=sdmxDefinition(xml,flow[1],flow[0],a.version);validateSdmxKey(def,key);
       const csv=oecd?await requestOecd(url):await(await fetchRetry(url,{headers:{Accept:'application/vnd.sdmx.data+csv;version=2.0.0'}})).text();

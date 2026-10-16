@@ -2,10 +2,22 @@ import { parse } from "csv-parse/sync";
 import {providerFetch} from "./access";
 import { XMLParser } from "fast-xml-parser";
 
-const BASE = "https://sdmx.oecd.org/public/rest";
-export const OECD_CATALOG_URL = `${BASE}/dataflow/all/all/latest?references=none`;
+export const OECD_SPACES = ["public", "sti-public"] as const;
+export type OecdSpace = typeof OECD_SPACES[number];
+
+export function resolveOecdSpace(datasetId?: string, space?: OecdSpace): OecdSpace {
+  if (space !== undefined && !OECD_SPACES.includes(space)) throw new Error("Invalid OECD space. Use public or sti-public.");
+  // TiVA dataflows can appear in the public catalogue but their retrieval service is separate.
+  return space ?? (datasetId?.split(",")[1]?.startsWith("DSD_TIVA_") ? "sti-public" : "public");
+}
+function baseUrl(space: OecdSpace): string { return `https://sdmx.oecd.org/${space}/rest`; }
+export function buildOecdCatalogUrl(space?: OecdSpace): URL {
+  return new URL(`${baseUrl(resolveOecdSpace(undefined, space))}/dataflow/all/all/latest?references=none`);
+}
+export const OECD_CATALOG_URL = String(buildOecdCatalogUrl());
 export interface OecdDataParams {
   datasetId: string;
+  space?: OecdSpace;
   version?: string;
   seriesKey: string;
   startPeriod?: string;
@@ -22,13 +34,17 @@ function dataset(datasetId: string, version = "latest") {
   return { agency, id, version };
 }
 
-export function buildOecdStructureUrl(datasetId: string, version?: string): URL {
+export function buildOecdStructureUrl(datasetId: string, version?: string, space?: OecdSpace): URL {
   const d = dataset(datasetId, version);
-  return new URL(`${BASE}/dataflow/${d.agency}/${d.id}/${d.version}?references=all`);
+  return new URL(`${baseUrl(resolveOecdSpace(datasetId, space))}/dataflow/${d.agency}/${d.id}/${d.version}?references=all`);
 }
 
 export function buildOecdDataUrl(params: OecdDataParams): URL {
   const d = dataset(params.datasetId, params.version);
+  const space = resolveOecdSpace(params.datasetId, params.space);
+  if ((space === "sti-public" || d.id.startsWith("DSD_TIVA_")) && (!params.startPeriod || !params.endPeriod)) {
+    throw new Error("OECD TiVA (sti-public) requires both start_period and end_period. Latest-observation query parameters are blocked by OECD.");
+  }
   if (params.seriesKey.length > 1000 || !/^[A-Z0-9_-]+(?:\+[A-Z0-9_-]+)*(?:\.[A-Z0-9_-]+(?:\+[A-Z0-9_-]+)*)+$/.test(params.seriesKey)) {
     throw new Error("Invalid series_key. Specify every dimension explicitly, separated by dots; combine codes with +. Wildcards and all are not supported. Inspect oecd_get_structure first.");
   }
@@ -45,7 +61,7 @@ export function buildOecdDataUrl(params: OecdDataParams): URL {
   if (params.startPeriod && params.endPeriod && periodOrder(params.startPeriod) > periodOrder(params.endPeriod)) throw new Error("start_period must not be after end_period.");
   // The data endpoint uses an omitted version for latest; literal "latest" is rejected.
   const flowRef = `${d.agency},${d.id}${d.version === "latest" ? "" : `,${d.version}`}`;
-  const url = new URL(`${BASE}/data/${flowRef}/${params.seriesKey}`);
+  const url = new URL(`${baseUrl(space)}/data/${flowRef}/${params.seriesKey}`);
   url.searchParams.set("dimensionAtObservation", "AllDimensions");
   url.searchParams.set("format", "csvfilewithlabels");
   if (params.startPeriod) url.searchParams.set("startPeriod", params.startPeriod);
@@ -68,7 +84,8 @@ function structures(xml: string): any {
   return result;
 }
 
-export function formatOecdDatasets(xml: string, query = "", offset = 0, limit = 20): string {
+export function formatOecdDatasets(xml: string, query = "", offset = 0, limit = 20, space?: OecdSpace): string {
+  const catalogUrl = buildOecdCatalogUrl(space);
   if (!Number.isInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 50) throw new Error("Invalid catalogue pagination: offset >= 0, limit 1–50.");
   const synonyms: Record<string,string[]> = { inflation:["inflation","consumer price","cpi","hicp"], gdp:["gdp","gross domestic product","national accounts"] };
   const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
@@ -83,11 +100,11 @@ export function formatOecdDatasets(xml: string, query = "", offset = 0, limit = 
     };
     return relevance(b)-relevance(a);
   });
-  const rows = flows.slice(offset, offset+limit).map(f => `${f.agencyID},${f.id} (version ${f.version}): ${english(f)}`);
-  return `${rows.join("\n") || "No matching OECD datasets on this page."}\nShowing ${rows.length} of ${flows.length} matches (offset ${offset}). Use offset to continue. Inspect oecd_get_structure before constructing a series_key.\nSource: ${OECD_CATALOG_URL}`;
+  const rows = flows.slice(offset, offset+limit).map(f => `${f.agencyID},${f.id} (version ${f.version}): ${english(f)} [space=${resolveOecdSpace(`${f.agencyID},${f.id}`, space)}]`);
+  return `${rows.join("\n") || "No matching OECD datasets on this page."}\nShowing ${rows.length} of ${flows.length} matches (offset ${offset}). Use offset to continue. Inspect oecd_get_structure before constructing a series_key. TiVA requires explicit start_period and end_period.\nSource: ${catalogUrl}`;
 }
 
-export function formatOecdStructure(xml: string, datasetId: string, version?: string, dimensionId?: string, query = ""): string {
+export function formatOecdStructure(xml: string, datasetId: string, version?: string, dimensionId?: string, query = "", space?: OecdSpace): string {
   const d = dataset(datasetId, version);
   const s = structures(xml);
   const flow = list(s.Dataflows?.Dataflow).find(f => f.id === d.id && f.agencyID === d.agency && (d.version === "latest" || f.version === d.version));
@@ -108,7 +125,8 @@ export function formatOecdStructure(xml: string, datasetId: string, version?: st
     const count = dimensionId ? 60 : 5;
     return `${x.id}: ${codes.slice(0,count).map(c=>`${c.id}=${english(c)}`).join("; ")}\nShowing ${Math.min(count,codes.length)} of ${codes.length} codes${cl ? "" : " (codelist unavailable)"}.`;
   });
-  return `Dataset ${datasetId} (version ${flow.version}): ${english(flow)}\nseries_key dimension order: ${dimensions.map(x=>x.id).join(".")}\nCodes in the structure are not a guarantee of available observations. Choose exact units, adjustment, methodology and transformation; do not equate national CPI, CPIH and HICP.\n\n${details.join("\n\n")}\n\nSource: ${buildOecdStructureUrl(datasetId,version)}`;
+  const resolvedSpace = resolveOecdSpace(datasetId, space);
+  return `Dataset ${datasetId} (version ${flow.version}): ${english(flow)}\nSpace: ${resolvedSpace}\nseries_key dimension order: ${dimensions.map(x=>x.id).join(".")}\nCodes in the structure are not a guarantee of available observations. Choose exact units, adjustment, methodology and transformation; do not equate national CPI, CPIH and HICP.${resolvedSpace === "sti-public" || d.id.startsWith("DSD_TIVA_") ? " TiVA requests require both start_period and end_period; latest-observation parameters are blocked by OECD." : ""}\n\n${details.join("\n\n")}\n\nSource: ${buildOecdStructureUrl(datasetId,version,space)}`;
 }
 
 export function formatOecdCsv(csv: string, url: URL, limit = 36): string {

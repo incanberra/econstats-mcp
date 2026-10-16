@@ -4,7 +4,7 @@ Economic data MCP server with an economist's methodology guide. Connects FRED, B
 
 ## Data guide
 
-See the [EconStats data guide](docs/data-guide.md) for provider coverage, key datasets and identifiers, data types, example research requests, and access and revision limits. It distinguishes catalogue discovery from working data retrieval, including the current OECD TiVA/CRS restriction.
+See the [EconStats data guide](docs/data-guide.md) for provider coverage, key datasets and identifiers, data types, example research requests, and access and revision limits. It distinguishes catalogue discovery from working data retrieval and explains the TiVA service and date-range requirements.
 
 ## Version 3: ABS, structured data and observed revisions
 
@@ -241,7 +241,7 @@ Run the offline regression tests with `bun test`.
 
 ## OECD Data Explorer
 
-OECD uses the current public SDMX API at `https://sdmx.oecd.org/public/rest`. No API key is required. The integration provides dataset discovery, dimension/code lookup, and data retrieval with English labels and source URLs.
+OECD uses the current SDMX APIs at `https://sdmx.oecd.org/public/rest` and `https://sdmx.oecd.org/sti-public/rest` (TiVA). No API key is required. The integration provides dataset discovery, dimension/code lookup, and data retrieval with English labels and source URLs.
 
 1. Call `oecd_list_datasets` with a topic such as `inflation`, `GDP`, `unemployment`, or `productivity`. Results contain the exact `agency,dataset` identifier and version. Use `offset` and `limit` to page through matches.
 2. Call `oecd_get_structure` with that `dataset_id`. It returns the ordered dimensions; use `dimension_id` and `query` to find country, measure, units, methodology, adjustment, or transformation codes. Codes in a codelist do not guarantee observations exist for every combination.
@@ -262,9 +262,44 @@ This dataset's order is `REF_AREA.FREQ.METHODOLOGY.MEASURE.UNIT_MEASURE.EXPENDIT
 
 Responses retain dimension labels, observation dates, status flags, `UNIT_MULT` scaling, base periods, and retrieval timestamps. Missing observations are omitted and counted, never treated as zero. The returned URL identifies the exact query for citation. Dataset discovery and structure filters share cached metadata downloads; data responses are cached, while HTTP/rate-limit/malformed-response errors are not.
 
-OECD currently limits downloads to 60 per hour. The connector does not immediately retry rate-limit errors. Some very large datasets block `lastNObservations`; supply `start_period` and preferably `end_period` to use a bounded request instead (the tool still returns only the latest `limit` observations from that range). This connector covers the `public` dissemination space; separate TiVA/CRS spaces are not included.
+OECD currently limits downloads to 60 per hour. The connector does not immediately retry rate-limit errors. Some very large datasets block `lastNObservations`; supply `start_period` and preferably `end_period` to use a bounded request instead (the tool still returns only the latest `limit` observations from that range). This connector supports `public` and `sti-public` (TiVA). The separate `dcd-public` CRS service is not included.
 
 References: [OECD API](https://www.oecd.org/en/data/insights/data-explainers/2024/09/api.html), [API best practices](https://www.oecd.org/en/data/insights/data-explainers/2024/11/Api-best-practices-and-recommendations.html), [Restricted query parameters](https://www.oecd.org/en/data/insights/data-explainers/2026/03/Restricted-API-parameter.html).
+
+### Trade in Value Added (TiVA)
+
+Use `space: "sti-public"` on `oecd_list_datasets` for the TiVA catalogue. All three OECD tools accept optional `space: "public" | "sti-public"`. For structure and data, datasets whose identifier starts with `DSD_TIVA_` automatically select `sti-public` when space is omitted; other datasets retain `public`. Explicit overrides are honoured. The selected service is part of request URLs and cache keys; citations identify the actual endpoint. No key is needed.
+
+TiVA blocks `lastNObservations` and `firstNObservations` throughout its service. Supply **both** `start_period` and `end_period`; the connector rejects missing bounds locally and sends neither blocked parameter. `limit` selects the latest returned observations per series within those bounds; it does not constrain the upstream download. Existing limits of 50 explicitly selected series, 120 output observations per series and a 20 MB response guard remain in place. Do not use wildcards or infer availability from codelists.
+
+Discover and inspect first:
+
+```json
+{"query":"TiVA","space":"sti-public","limit":10}
+```
+
+```json
+{"dataset_id":"OECD.STI.PIE,DSD_TIVA_MAINSH@DF_MAINSH","version":"1.1"}
+```
+
+Then request Australia's domestic value added in gross exports, all activities, World counterpart, percentage of gross exports:
+
+```json
+{
+  "dataset_id": "OECD.STI.PIE,DSD_TIVA_MAINSH@DF_MAINSH",
+  "version": "1.1",
+  "series_key": "EXGR_DVA.AUS._T.W.PT_EXGR.A",
+  "start_period": "2020",
+  "end_period": "2022",
+  "limit": 3
+}
+```
+
+This dataset's dimension order is `MEASURE.REF_AREA.ACTIVITY.COUNTERPART_AREA.UNIT_MEASURE.FREQ`. TiVA represents historical value-added estimates, not current monthly customs trade. Treat its units, edition, classifications, flags and revision status explicitly.
+
+For an opt-in MCP end-to-end check of TiVA discovery/structure/data, public OECD data and missing-bound rejection, run `bun run scripts/check-tiva-live.ts <report-directory-outside-repository>`. It requires no credentials and writes source-backed results outside the checkout. Use the existing updater and restart/reconnect the server to load the new tool schemas.
+
+Official reference: [OECD restricted API parameters](https://www.oecd.org/en/data/insights/data-explainers/2026/03/Restricted-API-parameter.html).
 
 ## Eurostat
 

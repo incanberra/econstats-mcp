@@ -3,7 +3,7 @@ import {checkedJson,legacyFailure,worldBankPages,worldBankUrl,formatWorldBank,ec
 import {AccessError,accessGovernor,type Provider} from "./access";
 import {connectionHealth} from "./health";
 import { buildImfDataUrl, fetchImfData, fetchImfDatasets, fetchImfStructure, type ImfDataParams } from "./imf";
-import { OECD_CATALOG_URL, buildOecdDataUrl, buildOecdStructureUrl, formatOecdCsv, formatOecdDatasets, formatOecdStructure, requestOecd, type OecdDataParams } from "./oecd";
+import { buildOecdCatalogUrl, buildOecdDataUrl, buildOecdStructureUrl, formatOecdCsv, formatOecdDatasets, formatOecdStructure, requestOecd, type OecdDataParams, type OecdSpace } from "./oecd";
 import { EUROSTAT_CATALOG_URL, buildEurostatDataUrl, buildEurostatStructureUrl, formatEurostatDatasets, formatEurostatStructure, formatEurostatJson, validateEurostatFilters, requestEurostat, type EurostatDataParams } from "./eurostat";
 import { BIS_CATALOG_URL, buildBisDataUrl, buildBisStructureUrl, formatBisDatasets, formatBisStructure, getBisDefinition, validateBisKey, formatBisCsv, requestBis, type BisDataParams } from "./bis";
 import {selectionEvidence,eiaObservationResponse} from "./selection-data";
@@ -404,29 +404,30 @@ export class EconStatsCoreClient {
     }
   }
 
-  async oecdListDatasets(query?: string, offset = 0, limit = 20): Promise<string> {
+  async oecdListDatasets(query?: string, offset = 0, limit = 20, space?: OecdSpace): Promise<string> {
     try {
       // Cache the catalogue once; different searches share the same upstream download.
-      const xml = await this.cache.getOrCompute("oecd:catalog:v1", TTL.oecdMetadata, async () => {
-        const text = await requestOecd(OECD_CATALOG_URL, true);
-        formatOecdDatasets(text); // Reject malformed responses before caching.
+      const url = buildOecdCatalogUrl(space);
+      const xml = await this.cache.getOrCompute(`oecd:catalog:v2:${url}`, TTL.oecdMetadata, async () => {
+        const text = await requestOecd(url, true);
+        formatOecdDatasets(text, "", 0, 20, space); // Reject malformed responses before caching.
         return text;
       });
-      return formatOecdDatasets(xml, query, offset, limit);
+      return formatOecdDatasets(xml, query, offset, limit, space);
     } catch (error) {
       return `OECD error: ${error instanceof Error ? error.message : "Request failed"}`;
     }
   }
 
-  async oecdGetStructure(datasetId: string, version?: string, dimensionId?: string, query?: string): Promise<string> {
+  async oecdGetStructure(datasetId: string, version?: string, dimensionId?: string, query?: string, space?: OecdSpace): Promise<string> {
     try {
-      const url = buildOecdStructureUrl(datasetId, version);
+      const url = buildOecdStructureUrl(datasetId, version, space);
       const xml = await this.cache.getOrCompute(`oecd:structure:v1:${url}`, TTL.oecdMetadata, async () => {
         const text = await requestOecd(url, true);
-        formatOecdStructure(text, datasetId, version);
+        formatOecdStructure(text, datasetId, version, undefined, "", space);
         return text;
       });
-      return formatOecdStructure(xml, datasetId, version, dimensionId, query);
+      return formatOecdStructure(xml, datasetId, version, dimensionId, query, space);
     } catch (error) {
       return `OECD error: ${error instanceof Error ? error.message : "Request failed"}`;
     }

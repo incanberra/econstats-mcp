@@ -12,6 +12,14 @@ test('SDK delivers methodology instructions and exposes valid public data schema
     expect(c.getInstructions()).not.toContain('BLS data values are index levels');
     expect(c.getInstructions()).toContain('quarterly growth is not universally annualized');
     const {tools}=await c.listTools();expect(tools.length).toBe(35);
+    for(const name of ['oecd_list_datasets','oecd_get_structure','oecd_get_data']){
+      const schema=tools.find(t=>t.name===name)!.inputSchema;
+      expect(schema.properties).toHaveProperty('space');
+      expect((schema.properties!.space as any).enum).toEqual(['public','sti-public']);
+      expect(schema.required??[]).not.toContain('space');
+    }
+    const tiva=await c.callTool({name:'oecd_get_data',arguments:{dataset_id:'OECD.STI.PIE,DSD_TIVA_MAINSH@DF_MAINSH',series_key:'AUS.A'}});
+    expect(tiva.isError).toBe(true);expect(JSON.stringify(tiva.content)).toContain('requires both start_period and end_period');
     expect(tools.find(t=>t.name==='comtrade_get_data')!.inputSchema.required).toContain('reporter_code');
     expect(tools.find(t=>t.name==='comtrade_get_data')!.inputSchema.properties).toHaveProperty('fresh');
     const eia=tools.find(t=>t.name==='eia_get_data')!;expect(eia.inputSchema.properties).toHaveProperty('route');expect(eia.inputSchema.properties).toHaveProperty('fresh');expect(eia.inputSchema.required).toContain('route');expect(eia.inputSchema.properties).not.toHaveProperty('oute');

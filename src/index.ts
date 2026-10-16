@@ -21,6 +21,7 @@ import { MEASURES, SOURCES } from "./core/selection";
 import {renderResult} from "./core/result";
 import {AccessError,PROVIDERS} from "./core/access";
 import {COMTRADE_CLASSIFICATIONS} from './core/comtrade';
+import {OECD_SPACES,buildOecdDataUrl} from './core/oecd';
 
 function txt(text: string) { return { content: [{ type: "text" as const, text }],...(/^(?:FRED|BLS|BEA|WORLD_BANK|ECB|IMF|OECD|Eurostat|BIS|EIA) error:/.test(text)?{isError:true}:{}) }; }
 function imfTxt(text: string) { return { ...txt(text), ...(text.startsWith("IMF error:") ? { isError: true } : {}) }; }
@@ -31,6 +32,12 @@ function eiaTxt(text: string) { return { ...txt(text), ...(text.startsWith("EIA 
 const client = new EconStatsCoreClient();
 async function data(tool:string,args:Record<string,any>){
  const {fresh=false,...parameters}=args;
+ // Local OECD URL validation has fixed, credential-free messages. Report required
+ // TiVA bounds before the generic upstream-error guard hides the corrective action.
+ if(tool==='oecd_get_data'){
+  try{buildOecdDataUrl({datasetId:args.dataset_id,space:args.space,version:args.version,seriesKey:args.series_key,startPeriod:args.start_period,endPeriod:args.end_period,limit:args.limit});}
+  catch(error){return {isError:true,content:[{type:'text' as const,text:error instanceof Error?`OECD error: ${error.message}`:'OECD error: Invalid query.'}]};}
+ }
  try{const result=await client.getStructuredData({tool,arguments:parameters},fresh);return {content:[{type:"text" as const,text:renderResult(result)}],structuredContent:result as unknown as Record<string,unknown>};}
  catch(error){return {isError:true,content:[{type:"text" as const,text:error instanceof AccessError?error.message:"Data retrieval failed validation. Check dataset metadata, parameters, credentials and provider availability; no data were inferred."}]};}
 }
@@ -66,7 +73,7 @@ SOURCE ROUTING:
 - US NIPA GDP detail → bea_get_data. State/regional and GDP-by-industry APIs are not exposed by this tool.
 - International → imf_list_datasets, imf_get_structure, then imf_get_data with current dataset codes. IFS was split into topic datasets.
 - International (long-run) → worldbank_get_data
-- OECD comparisons, productivity, labour markets → oecd_list_datasets, oecd_get_structure, then oecd_get_data. Always inspect dataset dimensions and definitions first.
+- OECD comparisons, productivity, labour markets and TiVA → oecd_list_datasets, oecd_get_structure, then oecd_get_data. Use space='sti-public' for TiVA discovery; DSD_TIVA_ datasets automatically use that service for structure/data. TiVA data requires both start_period and end_period. Always inspect dataset dimensions and definitions first.
 - Detailed European statistics → eurostat_list_datasets, eurostat_get_structure, eurostat_get_data. Use current datasets and explicit non-time filters; check coverage and dataset notes for discontinued series.
 - Credit, debt service, international banking, property prices and effective exchange rates across countries → bis_list_datasets, bis_get_structure, bis_get_data. Validate sector, valuation, adjustment, units, real/nominal definitions and breaks.
 - Energy prices, production, stocks, electricity and other energy statistics → eia_list_routes, eia_get_metadata, eia_get_data. Requires EIA_API_KEY. Distinguish spot/futures, grade/sector, units and observed statistics versus outlook projections. Never include the API key in citations.
@@ -222,33 +229,36 @@ server.tool(
 
 server.tool(
   "oecd_list_datasets",
-  "Search OECD's current Data Explorer catalogue by topic or dataset code. Use before fetching OECD GDP, productivity, inflation, labour-market or other comparisons. Results return agency,dataset and version. No API key required; cached searches share one catalogue download.",
+  "Search OECD's current Data Explorer catalogue by topic or dataset code. Use space='sti-public' for TiVA; omitted space searches public. Results return agency,dataset, version and retrieval space. No API key required; cached searches share one download per space.",
   {
     query: z.string().optional().describe("Keywords, e.g. inflation, unemployment, productivity, GDP"),
+    space: z.enum(OECD_SPACES).optional().describe("public (default) or sti-public (TiVA)"),
     offset: z.number().int().min(0).default(0).describe("Skip this many matching datasets"),
     limit: z.number().int().min(1).max(50).default(20),
   },
-  async ({ query, offset, limit }) => oecdTxt(await client.oecdListDatasets(query, offset, limit))
+  async ({ query, offset, limit, space }) => oecdTxt(await client.oecdListDatasets(query, offset, limit, space))
 );
 
 server.tool(
   "oecd_get_structure",
-  "Inspect an OECD dataset's exact series-key dimension order and code labels. Call with dimension_id and query to find units, countries, adjustment or transformations. Structure codes do not guarantee available observations. Do not guess dimension positions or interpret CPI, CPIH and HICP as identical.",
+  "Inspect an OECD dataset's exact series-key dimension order and code labels. DSD_TIVA_ datasets automatically use sti-public; space can select the service explicitly. Call with dimension_id and query to find codes. Structure codes do not guarantee observations. Do not guess dimension positions or equate CPI, CPIH and HICP.",
   {
     dataset_id: z.string().describe("agency,dataset from discovery, e.g. OECD.SDD.TPS,DSD_PRICES@DF_PRICES_ALL"),
+    space: z.enum(OECD_SPACES).optional().describe("Optional service override; DSD_TIVA_ datasets default to sti-public, others to public"),
     version: z.string().optional().describe("Dataset version from discovery; defaults to latest"),
     dimension_id: z.string().optional().describe("e.g. REF_AREA, UNIT_MEASURE or TRANSFORMATION"),
     query: z.string().optional().describe("Filter code labels, e.g. United Kingdom or growth rate"),
   },
-  async ({ dataset_id, version, dimension_id, query }) => oecdTxt(await client.oecdGetStructure(dataset_id, version, dimension_id, query))
+  async ({ dataset_id, version, dimension_id, query, space }) => oecdTxt(await client.oecdGetStructure(dataset_id, version, dimension_id, query, space))
 );
 
 server.tool(
   "oecd_get_data",
-  "Fetch OECD SDMX data after inspecting oecd_get_structure. Specify every dimension explicitly; combine codes with +. Returns latest observations per series, exact dimension labels, units, scaling, status flags, source URL and retrieval date. Missing values are not zero. For large datasets that block latest-observation queries, supply start_period and end_period. No key required. OECD limits downloads to 60/hour; repeated queries are cached and errors are not cached.",
+  "Fetch OECD SDMX data after inspecting oecd_get_structure. Specify every dimension explicitly; combine codes with +. DSD_TIVA_ datasets automatically use sti-public. TiVA requires both start_period and end_period; latest-observation parameters are blocked. space can override the service. Returns native units, labels, scaling, status, source URL and retrieval date. Missing values are not zero. No key required. OECD limits downloads to 60/hour; valid responses are cached.",
   {
     fresh:z.boolean().default(false).describe("Bypass observation cache to check revisions; budgets and cooldowns still apply."),
     dataset_id: z.string().describe("agency,dataset from discovery"),
+    space: z.enum(OECD_SPACES).optional().describe("Optional service override; DSD_TIVA_ datasets default to sti-public, others to public"),
     version: z.string().optional().describe("Dataset version; defaults to latest"),
     series_key: z.string().describe("Exact ordered dimensions from structure, e.g. USA+GBR.M.N.CPI.PA._T.N.GY for DSD_PRICES@DF_PRICES_ALL. No wildcard dimensions."),
     start_period: z.string().optional().describe("Inclusive start, e.g. 2025-01 or 2024-Q1"),
