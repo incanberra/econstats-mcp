@@ -51,4 +51,4 @@ try {
         throw 'Credential file changed; inspect the installation before continuing. No credential values were displayed.'
     }
 }
-Write-Host "Updated EconStats to $installedCommit on $branch. Restart or reconnect Codex to load v3's 31 tools."
+Write-Host "Updated EconStats to $installedCommit on $branch. Restart or reconnect Codex to load the updated tools."

@@ -11,8 +11,10 @@ import {buildAbsDataUrl,buildAbsStructureUrl,parseAbsCsv,requestAbs,sdmxDefiniti
 import {attributes,dataSeries,observation,finishResult,type DataResult,type DataSeries} from './result';
 import type {Provider} from './access';
 import type {Retrieval} from './selection';
+import {fetchComtradeData,validateComtradeData,type ComtradeDataParams} from './comtrade';
+import {AccessError} from './access';
 
-export type Keys={FRED_KEY?:string;BLS_KEY?:string;BEA_KEY?:string;EIA_KEY?:string};
+export type Keys={FRED_KEY?:string;BLS_KEY?:string;BEA_KEY?:string;EIA_KEY?:string;COMTRADE_KEY?:string};
 function requireKey(key:string|undefined,provider:string):asserts key is string {if(!key)throw new Error(`${provider} API key is not configured.`);}
 function multiplier(a:Record<string,string>):number|null {const value=a.UNIT_MULT??a.SCALE;return value!==undefined&&value!==''?Number(value):null;}
 function applyMetadata(s:DataSeries){
@@ -123,6 +125,11 @@ export function parseEcbData(data:any,url:URL,p:any,retrievedAt:string):DataResu
 
 export async function fetchStructured(r:Retrieval,keys:Keys,cache:LayeredCache,fresh=false):Promise<DataResult>{
   const a=r.arguments;
+  if(r.tool==='comtrade_get_data'){
+    const params=a as ComtradeDataParams;validateComtradeData(params);
+    if(params.access_mode==='authenticated'&&!keys.COMTRADE_KEY)throw new AccessError('COMTRADE','missing_key','Set COMTRADE_API_KEY locally, or explicitly choose preview.');
+    return cache.getOrCompute(`public:comtrade:v1:${JSON.stringify(params)}`,3600,()=>fetchComtradeData(params,keys.COMTRADE_KEY),fresh);
+  }
   // Refresh bypasses observation caches, never local budgets/cooldowns. Metadata can be cached.
   const compute=async():Promise<DataResult>=>{
     if(r.tool==='abs_get_data'){

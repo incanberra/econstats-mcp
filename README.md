@@ -1,10 +1,12 @@
 # econstats-mcp
 
-Economic data MCP server with an economist's methodology guide. Connects FRED, BLS, BEA, IMF, OECD, Eurostat, BIS, EIA, World Bank, ECB, and ABS to any MCP-compatible client.
+Economic data MCP server with an economist's methodology guide. Connects FRED, BLS, BEA, IMF, OECD, Eurostat, BIS, EIA, World Bank, ECB, ABS and UN Comtrade to any MCP-compatible client.
 
 ## Version 3: ABS, structured data and observed revisions
 
-All eleven direct observation tools return MCP `structuredContent` using the same
+Version 3.1 adds [UN Comtrade discovery, availability and bounded merchandise trade retrieval](docs/comtrade.md). The server exposes 35 tools. Preview access requires no key and always reports unverified completeness; authenticated retrieval uses an optional local `COMTRADE_API_KEY`. Installations now follow the maintained `main` branch.
+
+All twelve direct observation tools return MCP `structuredContent` using the same
 `schemaVersion: "1.0"` contract. The accompanying text is rendered from those exact
 records. Search/catalogue tools keep their existing interfaces unless noted.
 This is a major version because direct text formatting and BLS presentation changed.
@@ -104,7 +106,7 @@ normal request budgets and never writes keys into reports. Set
 The three ABS selector checks also run, using normal evidence caches.
 
 See [the review of PRs 1–8](docs/pr-stack-review-2026-10-16.md) for findings,
-repairs and the recommended merge order. No PR has been merged or published.
+repairs and the merge order. PRs 1-9 are now merged into the maintained `main` branch. Installation is from source; no npm publication is implied.
 
 ## What makes it different
 
@@ -112,7 +114,7 @@ Not just data access — the server includes methodology rules that teach LLMs w
 
 - CPI vs PCE for inflation (and why they diverge)
 - Prime-age EPOP vs headline unemployment for labor market tightness
-- YoY % change for CPI/PPI indexes, monthly change for employment
+- Explicit price-index levels or inflation transformations, and employment levels or changes, according to the requested measure
 - BLS direct on release day (FRED lags 30-60 minutes)
 - Real wages: explains which of 4 measures it's using and why
 
@@ -191,6 +193,7 @@ Connect as an MCP server in the OpenBB workspace AI settings.
 | `BLS_API_KEY` | Optional | https://data.bls.gov/registrationEngine/ (free, higher rate limits) |
 | `BEA_API_KEY` | Optional | https://apps.bea.gov/API/signup/ (free, for GDP detail) |
 | `EIA_API_KEY` | For EIA | https://www.eia.gov/opendata/register.php (free) |
+| `COMTRADE_API_KEY` | For authenticated Comtrade retrieval; public previews need no key | https://comtradedeveloper.un.org/ |
 
 IMF, OECD, Eurostat, BIS, World Bank, ECB, and ABS need no keys.
 

@@ -1,13 +1,14 @@
 import {PROVIDERS,accessGovernor,providerFetch,AccessError,type Provider} from "./access";
 import {checkedJson} from "./legacy";
 import {requestEurostat} from "./eurostat";
-type Keys={FRED_KEY?:string;BLS_KEY?:string;BEA_KEY?:string;EIA_KEY?:string};
+import {comtradeUrl,requestComtrade} from './comtrade';
+type Keys={FRED_KEY?:string;BLS_KEY?:string;BEA_KEY?:string;EIA_KEY?:string;COMTRADE_KEY?:string};
 export async function connectionHealth(keys:Keys,sources:Provider[]= [...PROVIDERS],probe=false){
   if(!sources.length||sources.some(s=>!PROVIDERS.includes(s))||(probe&&sources.length>3))throw new Error("Choose valid providers; a live health check supports at most 3 sources per call.");
   const keyFor:Partial<Record<Provider,string|undefined>>={FRED:keys.FRED_KEY,BEA:keys.BEA_KEY,EIA:keys.EIA_KEY};
   const g=accessGovernor(),results=[];
   for(const provider of [...new Set(sources)]){
-    const requiresKey=["FRED","BEA","EIA"].includes(provider),keyConfigured=provider==="BLS"?!!keys.BLS_KEY:requiresKey?!!keyFor[provider]:null;
+    const requiresKey=["FRED","BEA","EIA"].includes(provider),keyConfigured=provider==='COMTRADE'?!!keys.COMTRADE_KEY:provider==="BLS"?!!keys.BLS_KEY:requiresKey?!!keyFor[provider]:null;
     if(requiresKey&&!keyConfigured){results.push({...await g.snapshot(provider),status:"missing_key",keyConfigured,probed:false});continue;}
     let message:string|undefined;
     if(probe){
@@ -26,6 +27,10 @@ export async function connectionHealth(keys:Keys,sources:Provider[]= [...PROVIDE
         }else if(provider==="EIA"){
           const url=new URL("https://api.eia.gov/v2/");url.searchParams.set("api_key",keys.EIA_KEY!);
           const data=await checkedJson(url);if(data.error||!Array.isArray(data.response?.routes))throw new AccessError(provider,"invalid_response","Missing EIA route metadata.");
+        }else if(provider==='COMTRADE'){
+          const params={reporter_code:36,frequency:'A' as const,classification:'HS' as const,access_mode:keys.COMTRADE_KEY?'authenticated' as const:'preview' as const,periods:['2023']};
+          const b=await requestComtrade(comtradeUrl('availability',params,'2023'),keys.COMTRADE_KEY);if(!Array.isArray(b.data))throw new AccessError(provider,'invalid_response','Missing Comtrade availability metadata.');
+          message=keys.COMTRADE_KEY?'Authenticated availability endpoint checked; product coverage is not tested.':'Public availability endpoint checked; authenticated data access is not tested.';
         }else{
           const urls:Partial<Record<Provider,string>>={
             IMF:"https://api.imf.org/external/sdmx/2.1/dataflow/IMF.STA/CPI/latest?references=none",

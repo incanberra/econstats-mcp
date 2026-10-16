@@ -2,7 +2,7 @@ import {mkdir} from "node:fs/promises";
 import {join} from "node:path";
 import {atomicWrite,readStored,storageDirectory,storagePath,withFileLock} from "./storage";
 
-export const PROVIDERS=["FRED","BLS","BEA","IMF","OECD","EUROSTAT","BIS","EIA","WORLD_BANK","ECB","ABS"] as const;
+export const PROVIDERS=["FRED","BLS","BEA","IMF","OECD","EUROSTAT","BIS","EIA","WORLD_BANK","ECB","ABS","COMTRADE"] as const;
 export type Provider=typeof PROVIDERS[number];
 export type AccessKind="healthy"|"missing_key"|"rejected_key"|"rate_limited"|"budget_exhausted"|"unavailable"|"request_rejected"|"invalid_response"|"not_checked";
 export class AccessError extends Error {
@@ -12,6 +12,7 @@ type State={started:number;used:number;blockedUntil:number;status:AccessKind;che
 export function providerFor(url:URL):Provider {
   const hosts:Record<string,Provider>={"api.stlouisfed.org":"FRED","api.bls.gov":"BLS","apps.bea.gov":"BEA","api.imf.org":"IMF","sdmx.oecd.org":"OECD","ec.europa.eu":"EUROSTAT","stats.bis.org":"BIS","api.eia.gov":"EIA","api.worldbank.org":"WORLD_BANK","data-api.ecb.europa.eu":"ECB"};
   hosts['data.api.abs.gov.au']='ABS';
+  hosts['comtradeapi.un.org']='COMTRADE';
   const provider=hosts[url.hostname];if(!provider)throw new Error("Unsupported economic API host.");return provider;
 }
 export class RequestGovernor {
@@ -66,7 +67,7 @@ export async function providerFetch(input:string|URL,init?:RequestInit):Promise<
   catch{await g.record(provider,"unavailable");throw new AccessError(provider,"unavailable","Network failure or timeout. No credentials or authenticated URLs are returned.");}
   if(!response.ok){
     const status=response.status;
-    let kind:AccessKind=status===429?"rate_limited":status===401||(status===403&&["FRED","BEA","BLS","EIA"].includes(provider))?"rejected_key":status>=500?"unavailable":"request_rejected";
+    let kind:AccessKind=status===429?"rate_limited":status===401||(status===403&&(["FRED","BEA","BLS","EIA"].includes(provider)||provider==='COMTRADE'&&new Headers(init?.headers).has('Ocp-Apim-Subscription-Key')))?"rejected_key":status>=500?"unavailable":"request_rejected";
     if(status===400&&["FRED","BEA","BLS","EIA"].includes(provider)){
       const body=await response.clone().text().catch(()=>"");
       if(/(?:api[_ ]?key|userid|registrationkey).*?(?:invalid|not registered|not active|reject)|(?:invalid|unregistered).*?(?:api[_ ]?key|userid|registrationkey)/i.test(body.slice(0,20000)))kind="rejected_key";
