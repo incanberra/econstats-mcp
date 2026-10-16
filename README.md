@@ -2,6 +2,10 @@
 
 Economic data MCP server with an economist's methodology guide. Connects FRED, BLS, BEA, IMF, OECD, Eurostat, BIS, EIA, World Bank, ECB, ABS and UN Comtrade to any MCP-compatible client.
 
+## Data guide
+
+See the [EconStats data guide](docs/data-guide.md) for provider coverage, key datasets and identifiers, data types, example research requests, and access and revision limits. It distinguishes catalogue discovery from working data retrieval, including the current OECD TiVA/CRS restriction.
+
 ## Version 3: ABS, structured data and observed revisions
 
 Version 3.1 adds [UN Comtrade discovery, availability and bounded merchandise trade retrieval](docs/comtrade.md). The server exposes 35 tools. Preview access requires no key and always reports unverified completeness; authenticated retrieval uses an optional local `COMTRADE_API_KEY`. Installations now follow the maintained `main` branch.
