@@ -1,0 +1,26 @@
+{
+  "total": "307",
+  "dateFormat": "YYYY-MM",
+  "frequency": "monthly",
+  "data": [
+    {
+      "period": "2026-07",
+      "stateid": "US",
+      "stateDescription": "U.S. Total",
+      "sectorid": "RES",
+      "sectorName": "residential",
+      "price": "18.31",
+      "price-units": "cents per kilowatt-hour"
+    },
+    {
+      "period": "2026-06",
+      "stateid": "US",
+      "stateDescription": "U.S. Total",
+      "sectorid": "RES",
+      "sectorName": "residential",
+      "price": "18.34",
+      "price-units": "cents per kilowatt-hour"
+    }
+  ],
+  "description": "Electricity sales to ultimate customer by state and sector (number of customers, average price, revenue, and megawatthours of sales).  \n    Sources: Forms EIA-826, EIA-861, EIA-861M"
+}
