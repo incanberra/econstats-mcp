@@ -21,7 +21,7 @@ curl -fsSL https://bun.sh/install | bash
 # Install from this fork; the npm econstats-mcp package is currently unpublished.
 git clone https://github.com/incanberra/econstats-mcp.git
 cd econstats-mcp
-git switch add-bis
+git switch source-selector
 bun install --frozen-lockfile --ignore-scripts
 
 # Optional: save FRED_API_KEY and BEA_API_KEY in a local .env (excluded from Git).
@@ -225,7 +225,11 @@ References: [BIS API documentation](https://stats.bis.org/api-doc/v2/), [BIS sta
 
 ## Choosing a source
 
-The server provides source-selection instructions to the calling assistant. These are guidance, not a deterministic router or a guarantee that the assistant will always choose the best source.
+Call `select_source` before choosing between overlapping providers. It uses a deterministic, curated registry of exact statistical definitions and geography/frequency rules, then optionally checks current metadata and observations. It returns ranked candidates, reasons, key readiness, concrete retrieval calls, checked country periods, latest common period, observation counts, age and provenance links. It recommends only a candidate meeting the requested coverage; failed, sparse, missing-key and stale candidates remain visible.
+
+Example: `{"measure":"headline_cpi_yoy","countries":["US","GB"],"observations":12}` checks national CPI year-on-year definitions through OECD and IMF. `hicp_yoy` is a separate measure. `real_gdp_growth_qoq`, `real_gdp_growth_annualized` and `real_gdp_level` are distinct. Use `preferred_source` to preserve an explicit source override, `max_age_days` to require a freshness threshold, and `verify:false` for an explicitly unverified plan without network requests.
+
+For comparisons the selector requests extra history to accommodate country publication lags, finds common periods and instructs the caller to restrict its analysis to those periods. FRED period-start dates, BEA quarter labels and IMF monthly labels are normalised before alignment. BLS indexes or payroll levels without the requested calculations cannot verify inflation or monthly job-change requests. The calling assistant should extract the exact measure from the user's question and clarify ambiguous definitions before invoking the tool.
 
 - Honor the user's requested source and measure definition.
 - Choose by topic, geography, frequency, comparable definitions and actual usable coverage. Prefer original producers for release-day national statistics; FRED remains a convenient redistribution service.
@@ -233,7 +237,7 @@ The server provides source-selection instructions to the calling assistant. Thes
 - Inspect definitions and observation dates, use common periods for comparisons, and disclose stale data, definition differences and any fallback. Never silently switch CPI/CPIH/HICP, nominal/real series, growth conventions or sectors.
 - Explain why the source fits and cite the series, units, period, URL and retrieval date.
 
-A future source-selection tool could return ranked candidates, reasons, coverage/freshness checks and alternatives before retrieval. It should resolve the requested measure before ranking sources, keep the user's source override and expose the decision in the existing chat; a separate graphical interface is optional. It is not implemented in this release.
+The registry is not an exhaustive catalogue search. Some recognised measures/geographies still require provider discovery; the selector declines an exact recommendation rather than inventing a mapping. Checks sample available observations, not all historical vintages. Provider caches may be reused; retrieval/check timestamps do not guarantee that a release page has already propagated to its API. A preferred source is never silently replaced. Source recommendations are not evidence for economic figures: retrieve and cite the actual data using the returned plan.
 
 ## Caching
 
@@ -267,10 +271,11 @@ The cache layer also deduplicates in-flight requests, so a burst of identical Op
 
 Startup prefetch is disabled by default because short-lived stdio clients can create unnecessary upstream traffic. Turn it on only when you are running a persistent shared MCP service.
 
-## Tools (22)
+## Tools (23)
 
 | Tool | Description |
 |------|-------------|
+| `select_source` | Recommend exact-measure sources with reasons, retrieval plans and optional verified coverage |
 | `fred_search` | Search FRED series by keyword |
 | `fred_get_series` | Fetch FRED data with transformations (YoY%, change, etc.) |
 | `bls_get_series` | Fetch BLS data with pre-computed YoY% and monthly changes |
