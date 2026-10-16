@@ -1,7 +1,7 @@
 {
   "name": "econstats-mcp",
   "version": "3.1.0",
-  "description": "Economic data MCP server with ABS, structured observations, revision tracking and verified source selection",
+  "description": "Economic data MCP server with ABS, UN Comtrade, structured observations and revision tracking",
   "type": "module",
   "bin": {
     "econstats-mcp": "./src/index.ts"
@@ -23,6 +23,8 @@
     "eurostat",
     "bis",
     "eia",
+    "abs",
+    "comtrade",
     "world-bank",
     "ecb",
     "inflation",

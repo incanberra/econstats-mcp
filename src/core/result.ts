@@ -12,7 +12,7 @@ export interface DataSeries {
 export interface DataResult {
   schemaVersion:'1.0';source:Provider;retrievedAt:string;sourceUpdatedAt:string|null;
   query:Record<string,unknown>;series:DataSeries[];notes:string[];
-  coverage:{returnedSeries:number;returnedObservations:number;missingValues:number;truncated:boolean;upstreamTotalRows?:number};
+  coverage:{returnedSeries:number;returnedObservations:number;missingValues:number;truncated:boolean;upstreamTotalRows?:number;requestedCells?:number;returnedCells?:number;missingCells?:{period:string;productCode:string}[]};
 }
 export function stable(value:any):string {
   if(Array.isArray(value))return '['+value.map(stable).join(',')+']';

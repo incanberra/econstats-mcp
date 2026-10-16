@@ -110,7 +110,7 @@ export function parseComtradeData(b:any,a:ComtradeDataParams,url:URL,retrievedAt
    const id=stable(dimensions),unit=field==='primaryValue'?'USD':field==='netWgt'?'kg':row.qtyUnitAbbr&&row.qtyUnitAbbr!=='N/A'?String(row.qtyUnitAbbr):null;
    if(!groups.has(id))groups.set(id,dataSeries(`C/${a.frequency}/${row.classificationCode}`,dimensions,url,{frequency:a.frequency,unit,unitMultiplier:field==='qty'&&!unit?null:0,adjustment:'not_seasonally_adjusted',notes:['Reported merchandise trade. Imports and exports can use different valuation bases; no mirror substitution, aggregation, currency conversion or unit-value calculation was applied.']}));
    const s=groups.get(id)!;if(s.unit!==unit)throw new Error('Quantity unit changed within a series.');
-   s.labels={...s.labels,...attributes(row,['reporterDesc','partnerDesc','cmdDesc','flowDesc','customsDesc','motDesc'])};
+   s.labels={...s.labels,...Object.fromEntries(Object.entries({reporterCode:'reporterDesc',partnerCode:'partnerDesc',cmdCode:'cmdDesc',flowCode:'flowDesc',customsCode:'customsDesc',motCode:'motDesc'}).filter(([,label])=>typeof row[label]==='string').map(([dimension,label])=>[dimension,row[label]]))};
    s.observations.push(observation(a.frequency==='M'?`${period!.slice(0,4)}-${period!.slice(4)}`:period!,row[field],attributes(row,flagKeys)));
   }
  }
@@ -121,13 +121,17 @@ export function parseComtradeData(b:any,a:ComtradeDataParams,url:URL,retrievedAt
 }
 export async function fetchComtradeData(a:ComtradeDataParams,key?:string){
  validateComtradeData(a);requireCredential(a.access_mode,key);
- const combined=new Map<string,DataSeries>(),partitions=[];let truncated=a.access_mode==='preview';
+ const combined=new Map<string,DataSeries>(),partitions=[],returnedCells=new Set<string>();let truncated=a.access_mode==='preview';
  for(const period of a.periods){
   const url=comtradeUrl('data',a,period),body=await requestComtrade(url,key),r=parseComtradeData(body,a,url,new Date().toISOString());
   truncated ||=r.coverage.truncated;
+  for(const row of body.data)returnedCells.add(`${period}:${row.cmdCode}`);
   partitions.push({period,returnedRows:body.data.length,recordCap:a.max_records,possiblyTruncated:r.coverage.truncated});
   for(const s of r.series){const old=combined.get(s.id);if(old){if(old.unit!==s.unit||old.unitMultiplier!==s.unitMultiplier)throw new Error('Conflicting Comtrade units across periods.');old.observations.push(...s.observations);old.urls.push(...s.urls);}else combined.set(s.id,s);}
  }
  const result=finishResult('COMTRADE',a as unknown as Record<string,unknown>,[...combined.values()],new Date().toISOString(),12,[`Access mode: ${a.access_mode}. Preview completeness is always unverified; capped responses are partial.`,`Requested period coverage: ${JSON.stringify(partitions)}`,'Missing product/period combinations are not zeroes. No retry, pagination, aggregation or mirror substitution is performed.','Only final merchandise data in classic mode are supported. Source publication time is not inferred from retrieval time.'],null,truncated);
+ result.coverage.requestedCells=a.periods.length*a.product_codes.length;
+ result.coverage.returnedCells=returnedCells.size;
+ result.coverage.missingCells=a.periods.flatMap(period=>a.product_codes.filter(productCode=>!returnedCells.has(`${period}:${productCode}`)).map(productCode=>({period,productCode})));
  return result;
 }

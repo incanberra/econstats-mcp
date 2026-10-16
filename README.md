@@ -106,7 +106,7 @@ normal request budgets and never writes keys into reports. Set
 The three ABS selector checks also run, using normal evidence caches.
 
 See [the review of PRs 1–8](docs/pr-stack-review-2026-10-16.md) for findings,
-repairs and the recommended merge order. No PR has been merged or published.
+repairs and the merge order. PRs 1-9 are now merged into the maintained `main` branch. Installation is from source; no npm publication is implied.
 
 ## What makes it different
 
@@ -193,6 +193,7 @@ Connect as an MCP server in the OpenBB workspace AI settings.
 | `BLS_API_KEY` | Optional | https://data.bls.gov/registrationEngine/ (free, higher rate limits) |
 | `BEA_API_KEY` | Optional | https://apps.bea.gov/API/signup/ (free, for GDP detail) |
 | `EIA_API_KEY` | For EIA | https://www.eia.gov/opendata/register.php (free) |
+| `COMTRADE_API_KEY` | For authenticated Comtrade retrieval; public previews need no key | https://comtradedeveloper.un.org/ |
 
 IMF, OECD, Eurostat, BIS, World Bank, ECB, and ABS need no keys.
 

@@ -25,7 +25,7 @@ test('Comtrade preserves zero, missing values and estimation flags with native m
  const p={...params(),fields:['primaryValue','netWgt','qty'] as ComtradeDataParams['fields']},r=parseComtradeData({count:1,data:[row({primaryValue:0,isQtyEstimated:true})]},p,comtradeUrl('data',p,'2023'),at);
  expect(r.schemaVersion).toBe('1.0');expect(r.coverage.truncated).toBe(true);expect(r.sourceUpdatedAt).toBeNull();
  expect(r.series.map(s=>s.unit)).toEqual(['USD','kg','u']);expect(r.series.map(s=>s.observations[0].value)).toEqual([0,null,0]);
- expect(r.series[2].observations[0].attributes.isQtyEstimated).toBe('true');expect(r.series[0].dimensions.classificationCode).toBe('H6');expect(r.series[0].id).toMatch(/^[a-f0-9]{64}$/);
+ expect(r.series[2].observations[0].attributes.isQtyEstimated).toBe('true');expect(r.series[0].dimensions.classificationCode).toBe('H6');expect(r.series[0].labels.reporterCode).toBe('Australia');expect(r.series[0].id).toMatch(/^[a-f0-9]{64}$/);
 });
 for(const extra of [{reporterCode:156},{partnerCode:842},{partner2Code:1},{flowCode:'M'},{period:2022},{classificationCode:'S4'},{freqCode:'M'},{customsCode:'C01'},{motCode:1},{cmdCode:'TOTAL'},{classificationCode:null}])test(`Comtrade rejects unexpected returned identity ${JSON.stringify(extra)}`,()=>{const p=params();expect(()=>parseComtradeData({data:[row(extra)]},p,comtradeUrl('data',p,'2023'),at)).toThrow();});
 test('Comtrade pins classification, separates edition changes and rejects conflicting duplicates',()=>{
@@ -90,4 +90,7 @@ test('Comtrade uses shared cache and fresh refresh, with observed numeric and fl
 test('Comtrade health distinguishes public availability from authenticated access without exposing credentials',async()=>{
  mock({data:[]});const p=await connectionHealth({},['COMTRADE'],true);expect(p.providers[0].keyConfigured).toBe(false);expect(p.providers[0].message).toContain('authenticated data access is not tested');
  const auth=await connectionHealth({COMTRADE_KEY:'private-key'},['COMTRADE'],true);expect(auth.providers[0].keyConfigured).toBe(true);expect(JSON.stringify(auth)).not.toContain('private-key');
+});
+test('Comtrade reports missing requested product cells separately from numeric null observations',async()=>{
+ mock({data:[row()]});const r=await fetchComtradeData({...params(),product_codes:['8703','8704']});expect(r.coverage.requestedCells).toBe(2);expect(r.coverage.returnedCells).toBe(1);expect(r.coverage.missingCells).toEqual([{period:'2023',productCode:'8704'}]);expect(r.coverage.missingValues).toBe(0);
 });

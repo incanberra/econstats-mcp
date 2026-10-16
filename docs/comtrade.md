@@ -35,6 +35,8 @@ Data caches retain the original retrieval timestamp for an hour; discovery cache
 
 `connection_health` accepts `COMTRADE`. A public availability probe does not validate authenticated access. An authenticated availability probe checks the configured key at that endpoint, not every product or subscription entitlement. `select_source` remains limited to its existing exact macroeconomic definitions; use Comtrade discovery for merchandise trade.
 
+Coverage also reports `requestedCells`, `returnedCells` and a `missingCells` list of absent period/product pairs. These counts distinguish missing records from returned observations whose numeric values are null. They do not certify preview completeness.
+
 Official implementation references (checked 16 October 2026):
 
 - https://uncomtrade.org/docs/un-comtrade-api/
