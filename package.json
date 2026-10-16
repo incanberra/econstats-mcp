@@ -1,6 +1,6 @@
 {
   "name": "econstats-mcp",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Economic data MCP server — FRED, BLS, BEA, IMF, World Bank, ECB with economist methodology guide",
   "type": "module",
   "bin": {
@@ -8,7 +8,8 @@
   },
   "scripts": {
     "start": "bun src/index.ts",
-    "dev": "bun --watch src/index.ts"
+    "dev": "bun --watch src/index.ts",
+    "test": "bun test"
   },
   "keywords": [
     "mcp",
@@ -29,11 +30,14 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/joshfwaldman1/econstats-mcp"
+    "url": "https://github.com/incanberra/econstats-mcp"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@upstash/redis": "^1.37.0",
+    "csv-parse": "^7.0.3",
+    "fast-xml-parser": "^5.11.2",
+    "i18n-iso-countries": "^7.14.0",
     "zod": "^4.3.6"
   }
 }

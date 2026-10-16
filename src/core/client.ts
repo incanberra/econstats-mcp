@@ -1,5 +1,6 @@
 import { createLayeredCache, type LayeredCache } from "./cache";
 import { fetchRetry } from "./http";
+import { buildImfDataUrl, fetchImfData, fetchImfDatasets, fetchImfStructure, type ImfDataParams } from "./imf";
 
 type FredUnits = "lin" | "pc1" | "pch" | "ch1" | "chg";
 
@@ -304,53 +305,30 @@ export class EconStatsCoreClient {
     });
   }
 
-  async imfGetData(params: {
-    databaseId: "IFS" | "DOT" | "BOP";
-    frequency: "A" | "Q" | "M";
-    countryCodes: string[];
-    indicator: string;
-    startPeriod?: string;
-    endPeriod?: string;
-  }): Promise<string> {
-    const key = `imf:data:${params.databaseId}:freq=${params.frequency}:countries=${params.countryCodes.join("+")}:indicator=${params.indicator}:start=${params.startPeriod ?? ""}:end=${params.endPeriod ?? ""}`;
-    return this.cache.getOrCompute(key, TTL.imfData, async () => {
-      const url = new URL(
-        `https://dataservices.imf.org/REST/SDMX_JSON.svc/CompactData/${params.databaseId}/${params.frequency}.${params.countryCodes.join("+")}.${params.indicator}`,
-      );
-      if (params.startPeriod) url.searchParams.set("startPeriod", params.startPeriod);
-      if (params.endPeriod) url.searchParams.set("endPeriod", params.endPeriod);
+  async imfGetData(params: ImfDataParams): Promise<string> {
+    try {
+      const url = buildImfDataUrl(params);
+      return await this.cache.getOrCompute(`imf:sdmx21:v1:${url}`, TTL.imfData, () => fetchImfData(params));
+    } catch (error) {
+      return `IMF error: ${error instanceof Error ? error.message : "Request failed"}`;
+    }
+  }
 
-      const res = await fetchRetry(url.toString());
-      if (!res.ok) return `IMF API error: ${res.status}`;
+  async imfListDatasets(query?: string): Promise<string> {
+    try {
+      return await this.cache.getOrCompute(`imf:catalog:v1:${query ?? ""}`, TTL.imfData, () => fetchImfDatasets(query));
+    } catch (error) {
+      return `IMF error: ${error instanceof Error ? error.message : "Request failed"}`;
+    }
+  }
 
-      const data = await res.json();
-      const dataset = data?.CompactData?.DataSet;
-      if (!dataset) return "No data from IMF";
-
-      const rawSeries = dataset.Series;
-      const seriesArray = Array.isArray(rawSeries)
-        ? rawSeries
-        : rawSeries
-          ? [rawSeries]
-          : [];
-
-      return seriesArray
-        .map((series: { "@REF_AREA": string; "@INDICATOR": string; Obs: unknown }) => {
-          const observations = Array.isArray(series.Obs)
-            ? series.Obs
-            : series.Obs
-              ? [series.Obs]
-              : [];
-          const lines = observations
-            .map(
-              (obs: { "@TIME_PERIOD": string; "@OBS_VALUE": string }) =>
-                `${obs["@TIME_PERIOD"]}: ${obs["@OBS_VALUE"]}`,
-            )
-            .join("\n");
-          return `## IMF: ${series["@INDICATOR"]} (${series["@REF_AREA"]})\n${lines}`;
-        })
-        .join("\n\n");
-    });
+  async imfGetStructure(databaseId: string, dimensionId?: string, query?: string): Promise<string> {
+    try {
+      const key = JSON.stringify([databaseId, dimensionId, query]);
+      return await this.cache.getOrCompute(`imf:structure:v1:${key}`, TTL.imfData, () => fetchImfStructure(databaseId, dimensionId, query));
+    } catch (error) {
+      return `IMF error: ${error instanceof Error ? error.message : "Request failed"}`;
+    }
   }
 
   async worldBankGetData(params: {

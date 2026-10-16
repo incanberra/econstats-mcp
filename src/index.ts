@@ -19,13 +19,14 @@ import { z } from "zod";
 import { EconStatsCoreClient } from "./core/client";
 
 function txt(text: string) { return { content: [{ type: "text" as const, text }] }; }
+function imfTxt(text: string) { return { ...txt(text), ...(text.startsWith("IMF error:") ? { isError: true } : {}) }; }
 const client = new EconStatsCoreClient();
 
 // ── Server ──────────────────────────────────────────────────────────────
 
 const server = new McpServer({
   name: "econstats",
-  version: "2.0.0",
+  version: "2.0.1",
   instructions: `You are an expert economic analyst. Plain English in, cited analysis out.
 
 HARD RULES:
@@ -39,7 +40,7 @@ SOURCE ROUTING:
 - US macro → fred_get_series (check series_id from common IDs below)
 - Granular CPI/employment (metro, industry) → bls_get_series
 - GDP detail, state GDP → bea_get_data
-- International (recent) → imf_get_data
+- International → imf_list_datasets, imf_get_structure, then imf_get_data with current dataset codes. IFS was split into topic datasets.
 - International (long-run) → worldbank_get_data
 - Euro area → ecb_get_data
 - "What is $X worth today?" → inflation_adjust
@@ -129,24 +130,46 @@ server.tool(
 // ── IMF ─────────────────────────────────────────────────────────────────
 
 server.tool(
-  "imf_get_data",
-  "Fetch IMF International Financial Statistics. Best for cross-country macro comparisons with RECENT data (quarterly/monthly, few months lag). Use for: comparing inflation, GDP, exchange rates across countries. Common indicators: PCPI_PC_CP_A_PT (CPI % change), NGDP_XDC (nominal GDP), ENDA_XDC_USD_RATE (exchange rate). Country codes are ISO2 (US, GB, DE, JP, CN). For long-run structural data (poverty, education, demographics), use worldbank_get_data instead.",
+  "imf_list_datasets",
+  "Search the current IMF dataset catalogue by keyword or dataset code. IFS was split into topic datasets: CPI (inflation), ER (exchange rates), ANEA/QNEA (GDP), IMTS (trade), BOP, etc. Use this before guessing a dataset. No API key required.",
+  { query: z.string().optional().describe("Keywords, e.g. inflation, exchange rate, GDP, trade") },
+  async ({ query }) => imfTxt(await client.imfListDatasets(query))
+);
+
+server.tool(
+  "imf_get_structure",
+  "Get an IMF dataset's ordered series-key dimensions and valid code labels. Call again with dimension_id and query to find a specific country or indicator. Modern codes differ from legacy IFS/DOT/BOP codes; do not guess translations.",
   {
-    database_id: z.enum(["IFS", "DOT", "BOP"]).describe("IFS=financial stats, DOT=trade, BOP=balance of payments"),
-    frequency: z.enum(["A", "Q", "M"]).default("A"),
-    country_codes: z.array(z.string()).describe("ISO2 codes, e.g. ['US', 'DE', 'JP']"),
-    indicator: z.string().describe("e.g. PCPI_PC_CP_A_PT (CPI % change), NGDP_XDC (GDP)"),
+    database_id: z.string().describe("Dataset ID such as CPI, ER, BOP, or IMF.RES:WEO"),
+    dimension_id: z.string().optional().describe("Optional dimension from the returned order, e.g. COUNTRY or TYPE_OF_TRANSFORMATION"),
+    query: z.string().optional().describe("Filter code labels within the selected dimension"),
+  },
+  async ({ database_id, dimension_id, query }) => imfTxt(await client.imfGetStructure(database_id, dimension_id, query))
+);
+
+server.tool(
+  "imf_get_data",
+  "Fetch the current IMF SDMX API. First inspect imf_get_structure, then supply series_key in that dataset's exact dimension order (usually ISO3 countries). For CPI convenience queries, supply country_codes (ISO2/ISO3), frequency, and indicator: PCPI_PC_CP_A_PT=YoY inflation, PCPI_IX=index, PCPI_PC_PP_PT=period-over-period change. These CPI shortcuts also accept database_id=IFS for compatibility. Other legacy IFS indicators cannot be translated automatically. Results retain units, scale, reference periods, and observation-status flags. No key required.",
+  {
+    database_id: z.string().describe("Current dataset, e.g. CPI, ER, ANEA, QNEA, IMTS, BOP, IMF.RES:WEO. IFS supported only for the listed CPI shortcuts."),
+    series_key: z.string().optional().describe("Full current key, e.g. USA+GBR.CPI._T.YOY_PCH_PA_PT.M. Use this OR country_codes/indicator."),
+    frequency: z.enum(["A", "Q", "M"]).optional().describe("For CPI convenience queries only; defaults to A. A full series_key includes its own frequency."),
+    country_codes: z.array(z.string()).min(1).max(20).optional().describe("For CPI convenience queries only; ISO2 or ISO3, e.g. ['US', 'GB']"),
+    indicator: z.string().optional().describe("For CPI: PCPI_PC_CP_A_PT (YoY%), PCPI_IX (index), PCPI_PC_PP_PT (period-over-period%), or CPI._T.YOY_PCH_PA_PT. Defaults to YoY inflation."),
     start_period: z.string().optional(),
     end_period: z.string().optional(),
+    limit: z.number().int().min(1).max(120).default(36).describe("Latest observations per series, within the requested range"),
   },
-  async ({ database_id, frequency, country_codes, indicator, start_period, end_period }) => {
-    return txt(await client.imfGetData({
+  async ({ database_id, series_key, frequency, country_codes, indicator, start_period, end_period, limit }) => {
+    return imfTxt(await client.imfGetData({
       databaseId: database_id,
+      seriesKey: series_key,
       frequency,
       countryCodes: country_codes,
       indicator,
       startPeriod: start_period,
       endPeriod: end_period,
+      limit,
     }));
   }
 );
