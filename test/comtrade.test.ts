@@ -48,7 +48,7 @@ test('Comtrade maps monthly periods and keeps quantity units distinct',()=>{
 test('Comtrade request headers authenticate without leaking keys, envelopes or URLs',async()=>{
  let captured:any;globalThis.fetch=(async(input:any,init:any)=>{captured={url:String(input),init};return new Response(JSON.stringify({data:[row()],request:{key:'secret-value'}}));}) as typeof fetch;
  const p={...params(),access_mode:'authenticated' as const},r=await fetchComtradeData(p,'secret-value');
- expect(captured.init.headers['Ocp-Apim-Subscription-Key']).toBe('secret-value');expect(captured.url).not.toContain('secret-value');expect(JSON.stringify(r)).not.toContain('secret-value');expect(JSON.stringify(r)).not.toContain('request');expect(r.coverage.truncated).toBe(false);
+ expect(captured.init.headers['Ocp-Apim-Subscription-Key']).toBe('secret-value');expect(captured.url).not.toContain('secret-value');expect(JSON.stringify(r)).not.toContain('secret-value');expect(r).not.toHaveProperty('request');expect(r.coverage.truncated).toBe(false);
 });
 test('Comtrade missing credentials make no request; rejected auth never falls back to preview',async()=>{
  let calls=0;globalThis.fetch=(async()=>{calls++;return new Response('private upstream message',{status:403});}) as typeof fetch;
