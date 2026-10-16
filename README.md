@@ -1,6 +1,6 @@
 # econstats-mcp
 
-Economic data MCP server with an economist's methodology guide. Connects FRED, BLS, BEA, IMF, World Bank, and ECB to any MCP-compatible client.
+Economic data MCP server with an economist's methodology guide. Connects FRED, BLS, BEA, IMF, OECD, World Bank, and ECB to any MCP-compatible client.
 
 ## What makes it different
 
@@ -21,7 +21,7 @@ curl -fsSL https://bun.sh/install | bash
 # Install from this fork; the npm econstats-mcp package is currently unpublished.
 git clone https://github.com/incanberra/econstats-mcp.git
 cd econstats-mcp
-git switch fix-imf-sdmx
+git switch add-oecd
 bun install --frozen-lockfile --ignore-scripts
 
 # Optional: save FRED_API_KEY and BEA_API_KEY in a local .env (excluded from Git).
@@ -85,7 +85,7 @@ Connect as an MCP server in the OpenBB workspace AI settings.
 | `BLS_API_KEY` | Optional | https://data.bls.gov/registrationEngine/ (free, higher rate limits) |
 | `BEA_API_KEY` | Optional | https://apps.bea.gov/API/signup/ (free, for GDP detail) |
 
-IMF, World Bank, and ECB need no keys.
+IMF, OECD, World Bank, and ECB need no keys.
 
 ## Current IMF API
 
@@ -125,6 +125,33 @@ Official references: [IMF API](https://data.imf.org/en/Resource-Pages/IMF-API), 
 
 Run the offline regression tests with `bun test`.
 
+## OECD Data Explorer
+
+OECD uses the current public SDMX API at `https://sdmx.oecd.org/public/rest`. No API key is required. The integration provides dataset discovery, dimension/code lookup, and data retrieval with English labels and source URLs.
+
+1. Call `oecd_list_datasets` with a topic such as `inflation`, `GDP`, `unemployment`, or `productivity`. Results contain the exact `agency,dataset` identifier and version. Use `offset` and `limit` to page through matches.
+2. Call `oecd_get_structure` with that `dataset_id`. It returns the ordered dimensions; use `dimension_id` and `query` to find country, measure, units, methodology, adjustment, or transformation codes. Codes in a codelist do not guarantee observations exist for every combination.
+3. Call `oecd_get_data` with an explicit `series_key` in the returned dimension order. `+` combines codes in one dimension; wildcard/whole-dataset queries are rejected. The maximum selection is 50 series and 120 observations per series (default 36).
+
+Verified inflation example:
+
+```json
+{
+  "dataset_id": "OECD.SDD.TPS,DSD_PRICES@DF_PRICES_ALL",
+  "version": "1.0",
+  "series_key": "USA+GBR.M.N.CPI.PA._T.N.GY",
+  "limit": 12
+}
+```
+
+This dataset's order is `REF_AREA.FREQ.METHODOLOGY.MEASURE.UNIT_MEASURE.EXPENDITURE.ADJUSTMENT.TRANSFORMATION`: the example requests monthly national all-items consumer-price inflation, percent per annum, neither seasonally nor calendar adjusted, growth over one year. National CPI definitions can differ, including treatment of housing; do not assume the UK's national series is its inflation-target CPI. Preserve the specific series definition and country coverage in comparisons.
+
+Responses retain dimension labels, observation dates, status flags, `UNIT_MULT` scaling, base periods, and retrieval timestamps. Missing observations are omitted and counted, never treated as zero. The returned URL identifies the exact query for citation. Dataset discovery and structure filters share cached metadata downloads; data responses are cached, while HTTP/rate-limit/malformed-response errors are not.
+
+OECD currently limits downloads to 60 per hour. The connector does not immediately retry rate-limit errors. Some very large datasets block `lastNObservations`; supply `start_period` and preferably `end_period` to use a bounded request instead (the tool still returns only the latest `limit` observations from that range). This connector covers the `public` dissemination space; separate TiVA/CRS spaces are not included.
+
+References: [OECD API](https://www.oecd.org/en/data/insights/data-explainers/2024/09/api.html), [API best practices](https://www.oecd.org/en/data/insights/data-explainers/2024/11/Api-best-practices-and-recommendations.html), [Restricted query parameters](https://www.oecd.org/en/data/insights/data-explainers/2026/03/Restricted-API-parameter.html).
+
 ## Caching
 
 The server now uses a two-layer cache:
@@ -146,7 +173,8 @@ TTL policy is source-aware:
 - Hot FRED series like `PAYEMS`, `UNRATE`, `CPIAUCSL`, `CPILFESL`, `PCEPILFE`: 15 minutes
 - Standard FRED series: 6 hours
 - BLS / BEA: 6-12 hours
-- IMF / ECB: 24 hours
+- IMF / OECD data / ECB: 24 hours
+- OECD catalogue and structures: 7 days
 - World Bank and BLS lookup catalogs: days to weeks
 - Release calendar: 15 minutes
 
@@ -154,7 +182,7 @@ The cache layer also deduplicates in-flight requests, so a burst of identical Op
 
 Startup prefetch is disabled by default because short-lived stdio clients can create unnecessary upstream traffic. Turn it on only when you are running a persistent shared MCP service.
 
-## Tools (13)
+## Tools (16)
 
 | Tool | Description |
 |------|-------------|
@@ -166,6 +194,9 @@ Startup prefetch is disabled by default because short-lived stdio clients can cr
 | `imf_list_datasets` | Search the current IMF dataset catalogue |
 | `imf_get_structure` | Look up ordered dimensions and current codes |
 | `imf_get_data` | Fetch current IMF SDMX data with source attribution |
+| `oecd_list_datasets` | Search and page through the current OECD catalogue |
+| `oecd_get_structure` | Look up ordered dimensions and code labels |
+| `oecd_get_data` | Fetch OECD observations with labels, units, status and citations |
 | `worldbank_get_data` | World Bank development indicators (200+ countries) |
 | `worldbank_search` | Search World Bank indicators |
 | `ecb_get_data` | ECB data (euro area rates, HICP, money supply) |
@@ -174,7 +205,7 @@ Startup prefetch is disabled by default because short-lived stdio clients can cr
 
 ## Data Sources
 
-All data comes from free, public government APIs. We attribute all data to its source agency (Federal Reserve, BLS, BEA, IMF, World Bank, ECB). No data is redistributed — each query fetches directly from the source.
+All data comes from public official statistical APIs. We attribute data to its source agency (Federal Reserve, BLS, BEA, IMF, OECD, World Bank, ECB). Queries fetch from the source or reuse a cached source response.
 
 ## License
 
