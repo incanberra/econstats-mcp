@@ -3,7 +3,7 @@ param(
     [string]$BunPath = (Join-Path $env:USERPROFILE '.bun\bin\bun.exe')
 )
 $ErrorActionPreference = 'Stop'
-$branch = 'add-abs-structured-revisions'
+$branch = 'main'
 $installDirectory = (Resolve-Path -LiteralPath $InstallPath).Path
 if (-not (Test-Path -LiteralPath $BunPath -PathType Leaf)) { throw 'Bun executable not found.' }
 function Invoke-InstallGit {

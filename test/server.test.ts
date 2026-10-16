@@ -8,6 +8,9 @@ test('SDK delivers methodology instructions and exposes valid public data schema
   const c=new Client({name:'schema-regression',version:'1.0'});
   try{
     await c.connect(transport);expect(c.getServerVersion()?.version).toBe('3.0.0');expect(c.getInstructions()).toContain('SOURCE ROUTING');
+    expect(c.getInstructions()).not.toContain('Quarterly figures are annualized');
+    expect(c.getInstructions()).not.toContain('BLS data values are index levels');
+    expect(c.getInstructions()).toContain('quarterly growth is not universally annualized');
     const {tools}=await c.listTools();expect(tools.length).toBe(31);
     const eia=tools.find(t=>t.name==='eia_get_data')!;expect(eia.inputSchema.properties).toHaveProperty('route');expect(eia.inputSchema.properties).toHaveProperty('fresh');expect(eia.inputSchema.required).toContain('route');expect(eia.inputSchema.properties).not.toHaveProperty('oute');
     expect(tools.find(t=>t.name==='abs_get_data')!.inputSchema.properties).toHaveProperty('series_key');expect(tools.find(t=>t.name==='revision_history')!.inputSchema.required).toContain('series_id');

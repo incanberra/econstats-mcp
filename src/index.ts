@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * EconStats MCP Server v2
+ * EconStats MCP Server v3
  *
  * Economic data tools with methodology guide.
  * FRED, BLS, BEA, IMF, OECD, Eurostat, BIS, EIA, World Bank, ECB + inflation adjustment.
@@ -49,7 +49,7 @@ HARD RULES:
 - NO emojis. NO "Let me fetch..." narration. Just present results.
 - Every fact needs a citation. If you can't cite it, cut it.
 - Be concise: 200-300 words, lead with the answer.
-- For inflation indexes (CPI, PCE, PPI), always interpret as YoY % change, not raw levels.
+- Distinguish price index levels, year-on-year inflation and period changes. Use the requested measure and label any explicit transformation.
 - Don't compute averages or trends in your head — cite specific data points.
 
 SOURCE ROUTING:
@@ -78,9 +78,9 @@ METHODOLOGY (what makes this different):
 - "Jobs added?" → use change, not level. "Unemployment?" → consider U-6 alongside U-3.
 - "How tight is the labor market?" → prime-age EPOP (LNS12300060) + JOLTS openings + quits rate.
 - CPI vs PCE: CPI for general, PCE for Fed policy. CPI shelter LAGS market rents.
-- GDP: always real (GDPC1). Quarterly figures are annualized. Advance estimates get revised.
+- GDP: distinguish real and nominal levels, quarter-on-quarter growth and annualized growth. Follow each source's convention; quarterly growth is not universally annualized. US GDPC1 is a real GDP level, not a growth rate. Preliminary estimates can be revised.
 - "Real wages" has multiple measures — explain which you're using.
-- BLS data values are index levels with YoY annotations. Charts plot the level.
+- BLS series include indexes, counts, earnings and rates. Read units and adjustment metadata; chart the requested measure and label transformations.
 - OECD returns exact units, adjustment and transformation labels. Do not confuse national CPI/CPIH/HICP or annual growth with period-on-period growth. Respect different country coverage and observation dates.
 
 COMMON FRED IDS:
@@ -95,7 +95,7 @@ CES0500000003 (avg hourly earnings), RSAFS (retail sales), PSAVERT (savings rate
 server.tool(
   "connection_health",
   "Inspect key readiness, saved connection status, request budgets and provider cooldowns. probe=false makes no upstream requests and does not claim live connectivity. probe=true performs a live access check for up to 3 explicitly selected sources, consumes budgets and bypasses data caches. Never returns credentials. A healthy endpoint is not proof of dataset coverage or freshness.",
-  {sources:z.array(z.enum(SOURCES)).min(1).max(10).optional(),probe:z.boolean().default(false)},
+  {sources:z.array(z.enum(SOURCES)).min(1).max(SOURCES.length).optional(),probe:z.boolean().default(false)},
   async({sources,probe})=>{try{return txt(await client.connectionHealth(sources,probe));}catch{return {...txt("Connection health error: choose valid sources; live probes support at most 3 sources per call."),isError:true};}}
 );
 
@@ -131,7 +131,7 @@ server.tool(
 
 server.tool(
   "fred_get_series",
-  "Fetch FRED time series data with optional transformations. CRITICAL: For inflation indexes (CPIAUCSL, PCEPILFE, PPI), use units='pc1' to get year-over-year % change — raw index levels are meaningless to users. For employment (PAYEMS), use units='chg' to get monthly change in jobs. For rates (UNRATE, FEDFUNDS, DGS10), use units='lin' (default) since they're already in useful units. GDP: always use real GDP (GDPC1), never nominal.",
+  "Fetch FRED time series with an explicit transformation. For year-on-year inflation use units='pc1'; for index levels use 'lin'. For monthly payroll changes use 'chg'; rates normally use 'lin'. Match the requested real or nominal GDP definition: GDPC1 is a real level; A191RL1Q225SBEA is US annualized quarterly real growth. Preserve source units and national growth conventions.",
   {
     fresh:z.boolean().default(false).describe("Bypass observation cache to check revisions; budgets and cooldowns still apply."),
     series_id: z.string().describe("FRED series ID, e.g. CPIAUCSL, UNRATE, GDPC1"),

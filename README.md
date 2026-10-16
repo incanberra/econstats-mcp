@@ -125,7 +125,7 @@ curl -fsSL https://bun.sh/install | bash
 # Install from this fork; the npm econstats-mcp package is currently unpublished.
 git clone https://github.com/incanberra/econstats-mcp.git
 cd econstats-mcp
-git switch add-abs-structured-revisions
+git switch main
 bun install --frozen-lockfile --ignore-scripts
 
 # Save keys for the providers you use in a local .env (excluded from Git).
