@@ -102,7 +102,7 @@ export function formatEiaData(data:any,url:URL,p:EiaDataParams,meta:any):string{
 export async function requestEia(url:URL,key?:string):Promise<any>{
   if(!key)throw new Error("EIA_API_KEY is not configured. Get a free key at https://www.eia.gov/opendata/register.php and save it in the local .env file.");
   const authenticated=new URL(url);authenticated.searchParams.set("api_key",key);
-  let res:Response;try{res=await providerFetch(authenticated,{signal:AbortSignal.timeout(30000)});}catch(error){if(error instanceof AccessError&&error.kind!=="unavailable")throw error;throw new Error("EIA request failed or timed out.");}
+  let res:Response;try{res=await providerFetch(authenticated,{signal:AbortSignal.timeout(30000)});}catch(error){if(error instanceof AccessError)throw error;throw new Error("EIA request failed or timed out.");}
   if(res.status===429)throw new Error("EIA rate limit reached. Retry later; the demonstration key has low limits.");
   if(res.status===403)throw new Error("EIA rejected the API key. Check registration/activation and EIA_API_KEY.");
   if(!res.ok)throw new Error(`EIA API HTTP ${res.status}. Check route, fields, frequency and facets.`);

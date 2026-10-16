@@ -57,7 +57,7 @@ test("authenticates privately and strips API request echoes and reflected keys",
 test("missing/invalid keys and network errors do not expose credentials",async()=>{
  await expect(requestEia(url)).rejects.toThrow("not configured");
  globalThis.fetch=(async()=>{throw new Error("URL api_key=secret_test_key");}) as typeof fetch;
- await expect(requestEia(url,"secret_test_key")).rejects.toThrow("EIA request failed or timed out");
+ await expect(requestEia(url,"secret_test_key")).rejects.toThrow("EIA unavailable");
  globalThis.fetch=(async()=>new Response("secret_test_key",{status:403})) as typeof fetch;
  await expect(requestEia(url,"secret_test_key")).rejects.toThrow("rejected the API key");
 });

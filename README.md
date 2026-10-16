@@ -21,7 +21,7 @@ curl -fsSL https://bun.sh/install | bash
 # Install from this fork; the npm econstats-mcp package is currently unpublished.
 git clone https://github.com/incanberra/econstats-mcp.git
 cd econstats-mcp
-git switch improve-data-access
+git switch strengthen-source-selection
 bun install --frozen-lockfile --ignore-scripts
 
 # Save keys for the providers you use in a local .env (excluded from Git).
@@ -256,11 +256,17 @@ References: [EIA API documentation](https://www.eia.gov/opendata/documentation.p
 
 ## Choosing a source
 
-Call `select_source` before choosing between overlapping providers. It uses a deterministic, curated registry of exact statistical definitions and geography/frequency rules, then optionally checks current metadata and observations. It returns ranked candidates, reasons, key readiness, concrete retrieval calls, checked country periods, latest common period, observation counts, age and provenance links. It recommends only a candidate meeting the requested coverage; failed, sparse, missing-key and stale candidates remain visible.
+Call `select_source` before choosing between overlapping providers. It uses a curated registry of exact statistical definitions and geography/frequency rules, then validates structured provider records. It checks country, frequency, units and scaling, the requested transformation, required adjustment metadata and actual common observations. Display text is not used to establish coverage. All exact-match candidates are evaluated, including a fourth-ranked FRED fallback; provider request budgets still apply. Candidates with missing keys, failed access, uncertain definitions, incompatible units, sparse coverage or stale data remain visible with a specific rejection reason.
 
 Example: `{"measure":"headline_cpi_yoy","countries":["US","GB"],"observations":12}` checks national CPI year-on-year definitions through OECD and IMF. `hicp_yoy` is a separate measure. `real_gdp_growth_qoq`, `real_gdp_growth_annualized` and `real_gdp_level` are distinct. Use `preferred_source` to preserve an explicit source override, `max_age_days` to require a freshness threshold, and `verify:false` for an explicitly unverified plan without network requests.
 
-For comparisons the selector requests extra history to accommodate country publication lags, finds common periods and instructs the caller to restrict its analysis to those periods. FRED period-start dates, BEA quarter labels and IMF monthly labels are normalised before alignment. BLS indexes or payroll levels without the requested calculations cannot verify inflation or monthly job-change requests. The calling assistant should extract the exact measure from the user's question and clarify ambiguous definitions before invoking the tool.
+For comparisons the selector requests extra history to accommodate publication lags, finds actual common periods, and returns the matched values and observation flags in `verification.countries[].alignedObservations`. Each country includes its checked definition, source URLs and original `retrievedAt` timestamp. Use these values for the verified comparison; another retrieval may contain revisions. The latest common period takes precedence among valid candidates, followed by source suitability. Explicit source preferences are never silently replaced. Common observations need not be consecutive: the exact periods are listed.
+
+Real GDP levels and GDP growth default to quarterly frequency. Explicit incompatible frequencies are declined. FRED period-start dates are interpreted using the returned frequency metadata; daily data cannot pass as monthly data just by truncating dates. BLS inflation and payroll changes use reported calculations where supplied, or an explicitly labelled calculation from the exact prior-year/prior-month observation in the same series. Missing or conflicting baselines cannot verify a change. BEA GDP keeps the API row's unit multiplier, which may differ from the display scale in a published table heading, and obtains the chained-dollar reference year from the table notes.
+
+Required missing metadata prevents strict verification. In particular, the current IMF CPI response supplies the annual transformation but no seasonal-adjustment field, so it receives `definition_unconfirmed` for this inflation definition. Direct IMF data tools remain available. For measures whose registered definition does not require seasonal adjustment, such as reported energy prices and BIS financial series, an absent field is explicitly labelled `not_reported`, with a caveat; it is never claimed to be confirmed. BLS series IDs and the registered BEA tables establish some definitions where the API supplies no separate field. Matching national CPI dimensions does not harmonise country baskets or methodology.
+
+Eurostat monthly unemployment uses the current `age=TOTAL` code, whose unemployment population is ages 15–74; see the [official dataset methodology](https://ec.europa.eu/eurostat/cache/metadata/EN/une_rt_m_esms.htm). The calling assistant should extract the exact measure from the user's question and clarify ambiguous definitions before invoking the tool.
 
 - Honor the user's requested source and measure definition.
 - Choose by topic, geography, frequency, comparable definitions and actual usable coverage. Prefer original producers for release-day national statistics; FRED remains a convenient redistribution service.
@@ -268,7 +274,7 @@ For comparisons the selector requests extra history to accommodate country publi
 - Inspect definitions and observation dates, use common periods for comparisons, and disclose stale data, definition differences and any fallback. Never silently switch CPI/CPIH/HICP, nominal/real series, growth conventions or sectors.
 - Explain why the source fits and cite the series, units, period, URL and retrieval date.
 
-The registry is not an exhaustive catalogue search. Some recognised measures/geographies still require provider discovery; the selector declines an exact recommendation rather than inventing a mapping. Checks sample available observations, not all historical vintages. Provider caches may be reused; retrieval/check timestamps do not guarantee that a release page has already propagated to its API. A preferred source is never silently replaced. Source recommendations are not evidence for economic figures: retrieve and cite the actual data using the returned plan.
+The registry is not an exhaustive catalogue search. Some recognised measures/geographies still require discovery; the selector declines a recommendation rather than inventing a mapping. Structured evidence is cached for up to one hour (15 minutes for FRED); metadata caches have their provider-specific lifetimes. EIA retrieval and verification share validated observation responses. Cached evidence preserves its original retrieval time. Checks do not establish historical vintages or guarantee release-page freshness. Cite the underlying provider URLs and observation periods attached to the aligned values, rather than the selector as the statistical source.
 
 ## Connection health and request budgets
 
@@ -333,7 +339,7 @@ Startup prefetch is disabled by default because short-lived stdio clients can cr
 
 | Tool | Description |
 |------|-------------|
-| `select_source` | Recommend exact-measure sources with reasons, retrieval plans and optional verified coverage |
+| `select_source` | Verify structured definitions and common observations; return aligned values, citations, alternatives and rejection reasons |
 | `connection_health` | Inspect credentials, access status, budgets/cooldowns; optionally probe live endpoints |
 | `fred_search` | Search FRED series by keyword |
 | `fred_get_series` | Fetch FRED data with transformations (YoY%, change, etc.) |
