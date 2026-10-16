@@ -1,6 +1,6 @@
 # econstats-mcp
 
-Economic data MCP server with an economist's methodology guide. Connects FRED, BLS, BEA, IMF, OECD, Eurostat, World Bank, and ECB to any MCP-compatible client.
+Economic data MCP server with an economist's methodology guide. Connects FRED, BLS, BEA, IMF, OECD, Eurostat, BIS, World Bank, and ECB to any MCP-compatible client.
 
 ## What makes it different
 
@@ -21,7 +21,7 @@ curl -fsSL https://bun.sh/install | bash
 # Install from this fork; the npm econstats-mcp package is currently unpublished.
 git clone https://github.com/incanberra/econstats-mcp.git
 cd econstats-mcp
-git switch add-eurostat
+git switch add-bis
 bun install --frozen-lockfile --ignore-scripts
 
 # Optional: save FRED_API_KEY and BEA_API_KEY in a local .env (excluded from Git).
@@ -85,7 +85,7 @@ Connect as an MCP server in the OpenBB workspace AI settings.
 | `BLS_API_KEY` | Optional | https://data.bls.gov/registrationEngine/ (free, higher rate limits) |
 | `BEA_API_KEY` | Optional | https://apps.bea.gov/API/signup/ (free, for GDP detail) |
 
-IMF, OECD, Eurostat, World Bank, and ECB need no keys.
+IMF, OECD, Eurostat, BIS, World Bank, and ECB need no keys.
 
 ## Current IMF API
 
@@ -199,6 +199,42 @@ The first catalogue search can take tens of seconds while the complete English c
 
 References: [Eurostat API introduction](https://ec.europa.eu/eurostat/web/user-guides/data-browser/api-data-access/api-introduction), [Statistics API](https://ec.europa.eu/eurostat/web/user-guides/data-browser/api-data-access/api-getting-started/api), [SDMX metadata](https://ec.europa.eu/eurostat/web/user-guides/data-browser/api-data-access/api-getting-started/sdmx2.1), [Catalogue](https://ec.europa.eu/eurostat/web/user-guides/data-browser/api-data-access/api-getting-started/catalogue-api).
 
+## BIS
+
+BIS coverage uses the current public SDMX REST v2 API, with SDMX 2.1 metadata and labelled CSV observations. No API key or additional dependency is required. Dataset discovery covers credit, debt service, international banking, property prices, exchange rates, policy rates, derivatives and other published `WS_` statistical dataflows.
+
+1. Use `bis_list_datasets` to search dataset IDs and current versions, with `query`, `offset` and `limit`.
+2. Inspect `bis_get_structure` for ordered key dimensions and definitions. Use `dimension_id` and `query` to look up codes. Available codelists do not guarantee available observations.
+3. Use `bis_get_data` with every dimension explicitly selected in `series_key`; join alternatives using `+`. Codes and key positions are checked before download. Maximum 50 series and 120 observations per series, default 36.
+
+Examples (inspect metadata first):
+
+| Dataset | Key | Definition |
+|---|---|---|
+| `WS_CBPOL` | `M.US+GB` | Monthly central-bank policy rates, end of period |
+| `WS_TC` | `Q.US+GB.P.A.M.770.A` | Private non-financial credit from all lenders, market value, percentage of GDP, adjusted for breaks |
+| `WS_DSR` | `Q.US+GB.P` | Quarterly private non-financial debt service ratios |
+| `WS_SPP` | `Q.US+GB.R.628` | Real residential property prices, index 2010=100 |
+| `WS_EER` | `M.R.B.US+GB` | Real effective exchange rates, broad basket |
+
+For example, request `{"dataset_id":"WS_TC","series_key":"Q.US+GB.P.A.M.770.A","limit":4}`. The current credit dataflow version is 2.0; citations pin the version resolved from metadata. Specify `start_period`/`end_period` for an inclusive historical range (annual, monthly, quarterly, half-yearly or daily). The connector uses REST v2 time component constraints and displays the latest `limit` observations within the range for each series.
+
+Responses retain unit/scaling/base definitions, observation status, source and compilation notes, and break information. Dataset and series attributes are distinguished from key dimensions even when CSV puts attributes before time. Missing values are omitted and counted; country series are kept separate. HTTP failures, malformed CSV, conflicting observations and incompatible units are reported as MCP errors rather than cached observations. Each response includes the exact versioned API query, retrieval timestamp and BIS attribution. Latest periods and country coverage can differ; data are current revised observations rather than historical vintages.
+
+References: [BIS API documentation](https://stats.bis.org/api-doc/v2/), [BIS statistics](https://data.bis.org/topics), [Terms of permitted use](https://data.bis.org/help/legal).
+
+## Choosing a source
+
+The server provides source-selection instructions to the calling assistant. These are guidance, not a deterministic router or a guarantee that the assistant will always choose the best source.
+
+- Honor the user's requested source and measure definition.
+- Choose by topic, geography, frequency, comparable definitions and actual usable coverage. Prefer original producers for release-day national statistics; FRED remains a convenient redistribution service.
+- Use BIS for harmonised credit and financial statistics; Eurostat for European inflation/national accounts; ECB for its monetary policy and banking statistics; OECD/IMF for suitable international comparisons; World Bank for long-run development indicators.
+- Inspect definitions and observation dates, use common periods for comparisons, and disclose stale data, definition differences and any fallback. Never silently switch CPI/CPIH/HICP, nominal/real series, growth conventions or sectors.
+- Explain why the source fits and cite the series, units, period, URL and retrieval date.
+
+A future source-selection tool could return ranked candidates, reasons, coverage/freshness checks and alternatives before retrieval. It should resolve the requested measure before ranking sources, keep the user's source override and expose the decision in the existing chat; a separate graphical interface is optional. It is not implemented in this release.
+
 ## Caching
 
 The server now uses a two-layer cache:
@@ -223,6 +259,7 @@ TTL policy is source-aware:
 - IMF / OECD data / ECB: 24 hours
 - OECD catalogue and structures: 7 days
 - Eurostat data: 6 hours; catalogue and structures: 24 hours
+- BIS data: 6 hours; catalogue and structures: 7 days
 - World Bank and BLS lookup catalogs: days to weeks
 - Release calendar: 15 minutes
 
@@ -230,7 +267,7 @@ The cache layer also deduplicates in-flight requests, so a burst of identical Op
 
 Startup prefetch is disabled by default because short-lived stdio clients can create unnecessary upstream traffic. Turn it on only when you are running a persistent shared MCP service.
 
-## Tools (19)
+## Tools (22)
 
 | Tool | Description |
 |------|-------------|
@@ -248,6 +285,9 @@ Startup prefetch is disabled by default because short-lived stdio clients can cr
 | `eurostat_list_datasets` | Search Eurostat datasets with coverage and update dates |
 | `eurostat_get_structure` | Inspect required filters, code labels, coverage and dataset notes |
 | `eurostat_get_data` | Fetch Eurostat observations with units, flags and citation URLs |
+| `bis_list_datasets` | Discover BIS credit, banking, property-price, rate and other statistical datasets |
+| `bis_get_structure` | Inspect ordered BIS dimensions, definitions and code labels |
+| `bis_get_data` | Fetch BIS observations with units, compilation notes, flags and citation URLs |
 | `worldbank_get_data` | World Bank development indicators (200+ countries) |
 | `worldbank_search` | Search World Bank indicators |
 | `ecb_get_data` | ECB data (euro area rates, HICP, money supply) |
@@ -256,7 +296,7 @@ Startup prefetch is disabled by default because short-lived stdio clients can cr
 
 ## Data Sources
 
-All data comes from public official statistical APIs. We attribute data to its source agency (Federal Reserve, BLS, BEA, IMF, OECD, Eurostat, World Bank, ECB). Queries fetch from the source or reuse a cached source response.
+All data comes from public official statistical APIs. We attribute data to its source agency (Federal Reserve, BLS, BEA, IMF, OECD, Eurostat, BIS, World Bank, ECB). Queries fetch from the source or reuse a cached source response.
 
 ## License
 
