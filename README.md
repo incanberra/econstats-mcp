@@ -1,6 +1,6 @@
 # econstats-mcp
 
-Economic data MCP server with an economist's methodology guide. Connects FRED, BLS, BEA, IMF, OECD, World Bank, and ECB to any MCP-compatible client.
+Economic data MCP server with an economist's methodology guide. Connects FRED, BLS, BEA, IMF, OECD, Eurostat, World Bank, and ECB to any MCP-compatible client.
 
 ## What makes it different
 
@@ -21,7 +21,7 @@ curl -fsSL https://bun.sh/install | bash
 # Install from this fork; the npm econstats-mcp package is currently unpublished.
 git clone https://github.com/incanberra/econstats-mcp.git
 cd econstats-mcp
-git switch add-oecd
+git switch add-eurostat
 bun install --frozen-lockfile --ignore-scripts
 
 # Optional: save FRED_API_KEY and BEA_API_KEY in a local .env (excluded from Git).
@@ -85,7 +85,7 @@ Connect as an MCP server in the OpenBB workspace AI settings.
 | `BLS_API_KEY` | Optional | https://data.bls.gov/registrationEngine/ (free, higher rate limits) |
 | `BEA_API_KEY` | Optional | https://apps.bea.gov/API/signup/ (free, for GDP detail) |
 
-IMF, OECD, World Bank, and ECB need no keys.
+IMF, OECD, Eurostat, World Bank, and ECB need no keys.
 
 ## Current IMF API
 
@@ -152,6 +152,53 @@ OECD currently limits downloads to 60 per hour. The connector does not immediate
 
 References: [OECD API](https://www.oecd.org/en/data/insights/data-explainers/2024/09/api.html), [API best practices](https://www.oecd.org/en/data/insights/data-explainers/2024/11/Api-best-practices-and-recommendations.html), [Restricted query parameters](https://www.oecd.org/en/data/insights/data-explainers/2026/03/Restricted-API-parameter.html).
 
+## Eurostat
+
+Eurostat provides current European economic statistics through public APIs. The integration uses its English catalogue, compressed SDMX metadata, and JSON-stat 2.0 observations. No API key or new dependency is required.
+
+1. Call `eurostat_list_datasets` with a keyword or code. Results include coverage and update dates; use `offset`/`limit` for pagination. Older datasets can be discontinued or replaced, so check their coverage.
+2. Call `eurostat_get_structure` with the selected `dataset_id`. It returns required non-time dimensions, code labels, dataset notes and coverage. Use `dimension_id` and `query` to find units, countries, adjustment or components.
+3. Call `eurostat_get_data` with `filters` mapping **every non-time dimension** to an array of exact codes. Filters are checked against metadata before observations are downloaded. Maximum 50 series and 120 time positions (default 36). Broad/wildcard queries are rejected.
+
+Current HICP inflation example:
+
+```json
+{
+  "dataset_id": "prc_hicp_minr",
+  "filters": {
+    "freq": ["M"],
+    "unit": ["RCH_A"],
+    "coicop18": ["TOTAL"],
+    "geo": ["DE", "FR"]
+  },
+  "limit": 12
+}
+```
+
+This requests monthly all-items HICP annual inflation for Germany and France. Eurostat's old `prc_hicp_manr` dataset covers 1997–2025 and is replaced by `prc_hicp_minr`; the current classification uses `coicop18=TOTAL` rather than the old `coicop=CP00`. Inspect metadata instead of translating codes by guesswork.
+
+Quarterly real GDP growth example:
+
+```json
+{
+  "dataset_id": "namq_10_gdp",
+  "filters": {
+    "freq": ["Q"],
+    "unit": ["CLV_PCH_PRE"],
+    "s_adj": ["SCA"],
+    "na_item": ["B1GQ"],
+    "geo": ["DE", "FR"]
+  },
+  "limit": 4
+}
+```
+
+`start_period` and `end_period` are inclusive. Without bounds, `limit` selects the latest **time positions in the dataset**, not a guaranteed number of non-missing values for each country. Numeric results retain exact units, rate/index definitions, adjustments and status flags; missing values are omitted and counted rather than replaced with zero. Each response includes dataset notes, an exact query URL, a Data Browser link, dataset update date and retrieval timestamp. Eurostat publishes revised current data; this integration is not a historical-vintage archive.
+
+The first catalogue search can take tens of seconds while the complete English catalogue downloads. Catalogue and structures are cached across searches/filters; observations are cached separately. Malformed responses, HTTP failures, rate limits and queued asynchronous responses are marked as MCP errors and are not cached as observations. Main Eurostat datasets are supported; separate `DS-`/Comext endpoints and bulk asynchronous downloads are outside this integration.
+
+References: [Eurostat API introduction](https://ec.europa.eu/eurostat/web/user-guides/data-browser/api-data-access/api-introduction), [Statistics API](https://ec.europa.eu/eurostat/web/user-guides/data-browser/api-data-access/api-getting-started/api), [SDMX metadata](https://ec.europa.eu/eurostat/web/user-guides/data-browser/api-data-access/api-getting-started/sdmx2.1), [Catalogue](https://ec.europa.eu/eurostat/web/user-guides/data-browser/api-data-access/api-getting-started/catalogue-api).
+
 ## Caching
 
 The server now uses a two-layer cache:
@@ -175,6 +222,7 @@ TTL policy is source-aware:
 - BLS / BEA: 6-12 hours
 - IMF / OECD data / ECB: 24 hours
 - OECD catalogue and structures: 7 days
+- Eurostat data: 6 hours; catalogue and structures: 24 hours
 - World Bank and BLS lookup catalogs: days to weeks
 - Release calendar: 15 minutes
 
@@ -182,7 +230,7 @@ The cache layer also deduplicates in-flight requests, so a burst of identical Op
 
 Startup prefetch is disabled by default because short-lived stdio clients can create unnecessary upstream traffic. Turn it on only when you are running a persistent shared MCP service.
 
-## Tools (16)
+## Tools (19)
 
 | Tool | Description |
 |------|-------------|
@@ -197,6 +245,9 @@ Startup prefetch is disabled by default because short-lived stdio clients can cr
 | `oecd_list_datasets` | Search and page through the current OECD catalogue |
 | `oecd_get_structure` | Look up ordered dimensions and code labels |
 | `oecd_get_data` | Fetch OECD observations with labels, units, status and citations |
+| `eurostat_list_datasets` | Search Eurostat datasets with coverage and update dates |
+| `eurostat_get_structure` | Inspect required filters, code labels, coverage and dataset notes |
+| `eurostat_get_data` | Fetch Eurostat observations with units, flags and citation URLs |
 | `worldbank_get_data` | World Bank development indicators (200+ countries) |
 | `worldbank_search` | Search World Bank indicators |
 | `ecb_get_data` | ECB data (euro area rates, HICP, money supply) |
@@ -205,7 +256,7 @@ Startup prefetch is disabled by default because short-lived stdio clients can cr
 
 ## Data Sources
 
-All data comes from public official statistical APIs. We attribute data to its source agency (Federal Reserve, BLS, BEA, IMF, OECD, World Bank, ECB). Queries fetch from the source or reuse a cached source response.
+All data comes from public official statistical APIs. We attribute data to its source agency (Federal Reserve, BLS, BEA, IMF, OECD, Eurostat, World Bank, ECB). Queries fetch from the source or reuse a cached source response.
 
 ## License
 
