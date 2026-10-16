@@ -19,7 +19,8 @@ import { z } from "zod";
 import { EconStatsCoreClient } from "./core/client";
 import { MEASURES, SOURCES } from "./core/selection";
 import {renderResult} from "./core/result";
-import {AccessError} from "./core/access";
+import {AccessError,PROVIDERS} from "./core/access";
+import {COMTRADE_CLASSIFICATIONS} from './core/comtrade';
 
 function txt(text: string) { return { content: [{ type: "text" as const, text }],...(/^(?:FRED|BLS|BEA|WORLD_BANK|ECB|IMF|OECD|Eurostat|BIS|EIA) error:/.test(text)?{isError:true}:{}) }; }
 function imfTxt(text: string) { return { ...txt(text), ...(text.startsWith("IMF error:") ? { isError: true } : {}) }; }
@@ -41,7 +42,7 @@ async function jsonResult(work:()=>Promise<any>){
 
 const server = new McpServer({
   name: "econstats",
-  version: "3.0.0",
+  version: "3.1.0",
 }, {
   instructions: `You are an expert economic analyst. Plain English in, cited analysis out.
 
@@ -57,6 +58,7 @@ SOURCE ROUTING:
 - Honor an explicitly requested source. Otherwise choose by the requested measure, geography, frequency, comparable definitions and latest usable observations; there is no universal best source.
 - Prefer the original statistical producer for release-day or detailed national figures. FRED is convenient redistribution; identify the underlying producer when available. Prefer harmonised definitions for country comparisons.
 - Australian data: abs_list_datasets, abs_get_structure, abs_get_data. Validate codes, adjustment, units and publication freshness.
+- Merchandise trade: comtrade_list_reference, comtrade_search_products, comtrade_get_availability, then comtrade_get_data. Use numeric Comtrade area codes, exact products and periods. Public preview completeness is unverified. Distinguish reporting countries from partners, World totals from bilateral trade, HS editions, value from quantity and exports from re-exports. Do not sum overlapping totals or substitute mirror trade. Authenticated access requires COMTRADE_API_KEY; never expose it.
 - Direct data tools return structuredContent schemaVersion 1.0 and text rendered from the same observations. Unknown units/scaling stay null; native values are not silently transformed.
 - Use fresh=true for an explicit revision check, then revision_history with the returned series_id. These are observed snapshots, not official publication vintages.
 - US macro → fred_get_series (check series_id from common IDs below)
@@ -95,7 +97,7 @@ CES0500000003 (avg hourly earnings), RSAFS (retail sales), PSAVERT (savings rate
 server.tool(
   "connection_health",
   "Inspect key readiness, saved connection status, request budgets and provider cooldowns. probe=false makes no upstream requests and does not claim live connectivity. probe=true performs a live access check for up to 3 explicitly selected sources, consumes budgets and bypasses data caches. Never returns credentials. A healthy endpoint is not proof of dataset coverage or freshness.",
-  {sources:z.array(z.enum(SOURCES)).min(1).max(SOURCES.length).optional(),probe:z.boolean().default(false)},
+  {sources:z.array(z.enum(PROVIDERS)).min(1).max(PROVIDERS.length).optional(),probe:z.boolean().default(false)},
   async({sources,probe})=>{try{return txt(await client.connectionHealth(sources,probe));}catch{return {...txt("Connection health error: choose valid sources; live probes support at most 3 sources per call."),isError:true};}}
 );
 
@@ -433,6 +435,18 @@ server.tool("abs_get_data","Fetch exact ABS series after inspecting abs_get_stru
 server.tool("revision_history","Read locally observed snapshots and changes for a series_id returned by a data tool. Does not fetch upstream data or reconstruct official release vintages. Retains up to 50 changed snapshots per series by default.",
   {series_id:z.string().regex(/^[a-f0-9]{64}$/),limit:z.number().int().min(1).max(50).default(10)},
   async({series_id,limit})=>jsonResult(()=>client.revisionHistory(series_id,limit)));
+
+const comtradeSelection={reporter_code:z.number().int().min(1).max(999),periods:z.array(z.string()).min(1).max(12),frequency:z.enum(['A','M']),classification:z.enum(COMTRADE_CLASSIFICATIONS).default('HS'),access_mode:z.enum(['preview','authenticated']).default('preview')};
+server.tool('comtrade_list_reference','Discover Comtrade reporters, partners, HS classifications, flows and units. Search results preserve native numeric codes, historical validity and group flags. No key required.',
+ {reference:z.enum(['reporters','partners','classifications','flows','quantity_units','customs','transport']),query:z.string().max(200).optional(),offset:z.number().int().min(0).default(0),limit:z.number().int().min(1).max(100).default(50)},
+ async({reference,query,offset,limit})=>jsonResult(()=>client.comtradeReferences(reference,query,offset,limit)));
+server.tool('comtrade_search_products','Search official HS commodity codes and hierarchy. Pin an edition H0-H6 for comparisons; HS combines editions. Product discovery does not prove data availability. No key required.',
+ {classification:z.enum(COMTRADE_CLASSIFICATIONS).default('HS'),query:z.string().max(200).optional(),offset:z.number().int().min(0).default(0),limit:z.number().int().min(1).max(100).default(50)},
+ async({classification,query,offset,limit})=>jsonResult(()=>client.comtradeProducts(classification,query,offset,limit)));
+server.tool('comtrade_get_availability','Check final merchandise data availability for one reporter and 1-12 explicit periods. Annual YYYY, monthly YYYYMM. Does not verify individual products or partners. Preview mode is public; authenticated requires COMTRADE_API_KEY. Makes up to one bounded request per period; fresh bypasses cache.',
+ {...comtradeSelection,fresh:z.boolean().default(false)},async({fresh,...args})=>jsonResult(()=>client.comtradeAvailability(args,fresh)));
+server.tool('comtrade_get_data','Retrieve bounded final merchandise trade for exact reporter, partner, HS products and periods in classic mode (partner2=0, customs=C00, transport=0). Values are USD, netWgt is kg; quantity uses reported units. Preview is always marked incomplete/unverified; authenticated requires a key and never falls back silently. Up to 12 requests, 500 rows per period; no wildcard downloads or automatic pagination. Native flags and HS editions are preserved. fresh=true checks revisions; use revision_history for observed changes.',
+ {...comtradeSelection,partner_code:z.number().int().min(0).max(999).describe('Comtrade partner code; 0 means World'),product_codes:z.array(z.string().regex(/^(TOTAL|\d{2}|\d{4}|\d{6})$/)).min(1).max(10),flow_code:z.enum(['M','X','RM','RX']),fields:z.array(z.enum(['primaryValue','netWgt','qty'])).min(1).max(3).default(['primaryValue']),max_records:z.number().int().min(1).max(500).default(500),fresh:z.boolean().default(false)},async(args)=>data('comtrade_get_data',args));
 
 const PORT = parseInt(process.env.MCP_PORT || process.env.PORT || "0");
 

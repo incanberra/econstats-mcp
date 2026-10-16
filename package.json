@@ -1,6 +1,6 @@
 {
   "name": "econstats-mcp",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "Economic data MCP server with ABS, structured observations, revision tracking and verified source selection",
   "type": "module",
   "bin": {

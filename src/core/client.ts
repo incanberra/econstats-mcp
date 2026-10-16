@@ -14,6 +14,7 @@ import {RevisionTracker} from './revisions';
 import {ABS_CATALOG_URL,absCatalogue,absStructure,buildAbsStructureUrl,requestAbs,sdmxDefinition} from './abs';
 import {dataSeries,finishResult} from './result';
 import type {Retrieval} from './selection';
+import {comtradeReferences,comtradeProducts,comtradeAvailability,type ComtradeReference,type ComtradeClassification,type ComtradeSelection} from './comtrade';
 
 type FredUnits = "lin" | "pc1" | "pch" | "ch1" | "chg";
 
@@ -64,11 +65,12 @@ export class EconStatsCoreClient {
   private revisions=new RevisionTracker();
 
   constructor(
-    private env: {FRED_KEY?:string;BLS_KEY?:string;BEA_KEY?:string;EIA_KEY?:string} = {
+    private env: {FRED_KEY?:string;BLS_KEY?:string;BEA_KEY?:string;EIA_KEY?:string;COMTRADE_KEY?:string} = {
       FRED_KEY: process.env.FRED_API_KEY,
       BLS_KEY: process.env.BLS_API_KEY,
       BEA_KEY: process.env.BEA_API_KEY,
       EIA_KEY: process.env.EIA_API_KEY,
+      COMTRADE_KEY: process.env.COMTRADE_API_KEY || process.env.COMTRADE_SUBSCRIPTION_KEY,
     },
     cache = createLayeredCache(),
   ) {
@@ -106,6 +108,9 @@ export class EconStatsCoreClient {
 
   async getStructuredData(request:Retrieval,fresh=false){return this.revisions.track(await fetchStructured(request,this.env,this.cache,fresh));}
   async revisionHistory(seriesId:string,limit=10){return this.revisions.history(seriesId,limit);}
+  async comtradeReferences(reference:ComtradeReference,query?:string,offset=0,limit=50){return comtradeReferences(this.cache,reference,query,offset,limit);}
+  async comtradeProducts(classification:ComtradeClassification,query?:string,offset=0,limit=50){return comtradeProducts(this.cache,classification,query,offset,limit);}
+  async comtradeAvailability(params:ComtradeSelection,fresh=false){return comtradeAvailability(this.cache,params,this.env.COMTRADE_KEY,fresh);}
   async absListDatasets(query?:string,offset=0,limit=20){
     const xml=await this.cache.getOrCompute('abs:catalog:v1',86400,async()=>{const xml=await requestAbs(ABS_CATALOG_URL);absCatalogue(xml);return xml;});return absCatalogue(xml,query,offset,limit);
   }

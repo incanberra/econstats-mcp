@@ -1,10 +1,12 @@
 # econstats-mcp
 
-Economic data MCP server with an economist's methodology guide. Connects FRED, BLS, BEA, IMF, OECD, Eurostat, BIS, EIA, World Bank, ECB, and ABS to any MCP-compatible client.
+Economic data MCP server with an economist's methodology guide. Connects FRED, BLS, BEA, IMF, OECD, Eurostat, BIS, EIA, World Bank, ECB, ABS and UN Comtrade to any MCP-compatible client.
 
 ## Version 3: ABS, structured data and observed revisions
 
-All eleven direct observation tools return MCP `structuredContent` using the same
+Version 3.1 adds [UN Comtrade discovery, availability and bounded merchandise trade retrieval](docs/comtrade.md). The server exposes 35 tools. Preview access requires no key and always reports unverified completeness; authenticated retrieval uses an optional local `COMTRADE_API_KEY`. Installations now follow the maintained `main` branch.
+
+All twelve direct observation tools return MCP `structuredContent` using the same
 `schemaVersion: "1.0"` contract. The accompanying text is rendered from those exact
 records. Search/catalogue tools keep their existing interfaces unless noted.
 This is a major version because direct text formatting and BLS presentation changed.
@@ -112,7 +114,7 @@ Not just data access — the server includes methodology rules that teach LLMs w
 
 - CPI vs PCE for inflation (and why they diverge)
 - Prime-age EPOP vs headline unemployment for labor market tightness
-- YoY % change for CPI/PPI indexes, monthly change for employment
+- Explicit price-index levels or inflation transformations, and employment levels or changes, according to the requested measure
 - BLS direct on release day (FRED lags 30-60 minutes)
 - Real wages: explains which of 4 measures it's using and why
 
