@@ -2,7 +2,7 @@ import iso from "i18n-iso-countries";
 import {AccessError} from "./access";
 import {type SeriesEvidence,finishEvidence,comparisonSignature,expectedAdjustment,expectedTransformation,VerificationError,requireEvidence as check} from "./evidence";
 
-export const SOURCES = ["FRED","BLS","BEA","IMF","OECD","EUROSTAT","BIS","ECB","WORLD_BANK","EIA"] as const;
+export const SOURCES = ["FRED","BLS","BEA","IMF","OECD","EUROSTAT","BIS","ECB","WORLD_BANK","EIA","ABS"] as const;
 export const MEASURES = ["headline_cpi_yoy","core_cpi_yoy","hicp_yoy","cpih_yoy","real_gdp_level","real_gdp_growth_qoq","real_gdp_growth_annualized","unemployment_rate","nonfarm_jobs_change","private_credit_gdp","credit_gap","private_debt_service","crossborder_bank_claims","real_house_prices","nominal_house_prices","real_effective_exchange_rate","nominal_effective_exchange_rate","usd_exchange_rate","policy_rate","ecb_deposit_rate","population","gdp_per_capita_ppp","electricity_price","electricity_sales","wti_spot_price","gasoline_price","natural_gas_spot_price","residential_electricity_price","residential_electricity_sales","regular_gasoline_price","henry_hub_spot_price"] as const;
 export type Source = typeof SOURCES[number];
 export type Measure = typeof MEASURES[number];
@@ -56,6 +56,12 @@ export function rankSources(input: SelectionParams, configured: Partial<Record<S
   const bis=(id:string,key:(c:string)=>string,definition:string,countryDimension?:string)=>add("BIS",110,definition,"BIS supplies comparable financial definitions and preserves compilation/break notes.",p.countries.filter(c=>c!=="EA").map(c=>({tool:"bis_get_data",arguments:{dataset_id:id,series_key:key(alpha2(c)),limit}})),{tool:"bis_get_structure",arguments:{dataset_id:id}},["National compilation and coverage can still differ; inspect notes."],p.countries.map(c=>`${countryDimension??(/WS_TC|WS_DSR/.test(id)?"BORROWERS_CTY":"REF_AREA")}=${alpha2(c)}`));
   const eurostat=(id:string,filters:Record<string,string[]>,definition:string)=>add("EUROSTAT",115,definition,"Eurostat provides the requested European statistical definition.",p.countries.map(c=>({tool:"eurostat_get_data",arguments:{dataset_id:id,filters:{...filters,geo:[alpha2(c)]},limit}})),{tool:"eurostat_get_structure",arguments:{dataset_id:id}},["Current revised observations; check dataset notes and discontinued classifications."],p.countries.map(c=>`geo=${alpha2(c)}`));
   const allowed=(...f:string[])=>f.includes(p.frequency);
+  if(p.countries.length===1&&p.countries[0]==='AUS'){
+    const spec=p.measure==='headline_cpi_yoy'&&allowed('monthly')?{id:'CPI',key:'3.10001.10.50.M',definition:'Australian all-groups CPI, original (NSA), percentage change from the previous year, monthly.'}:
+      p.measure==='unemployment_rate'&&allowed('monthly')?{id:'LF',key:'M13.3.1599.20.AUS.M',definition:'Australian unemployment rate, persons, total age, seasonally adjusted, percent.'}:
+      p.measure==='real_gdp_growth_qoq'&&allowed('quarterly')?{id:'ANA_AGG',key:'M2.GPM.20.AUS.Q',definition:'Australian chain-volume GDP growth from the previous quarter, seasonally adjusted, not annualised.'}:undefined;
+    if(spec)add('ABS',125,spec.definition,'ABS is the original producer of Australian national statistics.',[{tool:'abs_get_data',arguments:{dataset_id:spec.id,series_key:spec.key,limit:p.observations}}],{tool:'abs_get_structure',arguments:{dataset_id:spec.id}},['The ABS API may lag its publications. Australian GDP is SA; do not equate it with European SCA or US annualised growth.']);
+  }
   if(p.measure==="headline_cpi_yoy"&&allowed("monthly")){
     if(onlyUS){bls("CUUR0000SA0","All-items CPI-U, not seasonally adjusted; year-on-year percentage change.");fred("CPIAUCNS","pc1",90,"All-items CPI-U, not seasonally adjusted; year-on-year percentage change.");}
     if(!p.countries.includes("EA")){
@@ -121,7 +127,7 @@ export async function selectSource(params:SelectionParams,configured:Partial<Rec
         check(e.country===p.countries[i],"country_mismatch","Returned country does not match the request.");
         check(e.frequency===p.frequency,"frequency_mismatch","Returned frequency does not match the request.");
         check(e.transformation===expectedTransformation(p.measure),"transformation_mismatch","Returned transformation does not match the requested growth convention.");
-        const adjustment=expectedAdjustment(p.measure);
+        const adjustment=expectedAdjustment(p.measure,c.source);
         check(!adjustment||e.adjustment!=="not_reported","definition_unconfirmed","Seasonal adjustment is not supplied by this provider response; a comparable definition cannot be confirmed.");
         check(!adjustment||e.adjustment===adjustment,"adjustment_mismatch","Returned seasonal/calendar adjustment differs from the requested definition.");
         if(/cpi.*yoy|hicp_yoy|gdp_growth|unemployment_rate/.test(p.measure))check(e.unit==="percent"&&e.unitMultiplier===0,"unit_mismatch","Expected unscaled percentage units.");
@@ -139,7 +145,7 @@ export async function selectSource(params:SelectionParams,configured:Partial<Rec
       const status=series.some(e=>!e.observations.length)?"no_data":common.length<p.observations?"partial_coverage":p.maxAgeDays!==undefined&&age!==null&&age>p.maxAgeDays?"stale":"verified";
       const countries=series.map(e=>({country:e.country,periods:e.observations.map(o=>o.period),latest:e.observations.at(-1)?.period??null,observations:e.observations.length,urls:e.urls,retrievedAt:e.retrievedAt,
         definition:{measure:e.measure,frequency:e.frequency,unit:e.unit,unitMultiplier:e.unitMultiplier,adjustment:e.adjustment,transformation:e.transformation,dimensions:e.dimensions},
-        alignedObservations:e.observations.filter(o=>common.includes(o.period)),notes:e.notes}));
+        alignedObservations:e.observations.filter(o=>common.includes(o.period)),notes:e.notes,revision:e.revision}));
       result.verification={status,message:status==='verified'?"Structured provider records confirm definition and overlapping observations.":status==='partial_coverage'?`Only ${common.length} common observations; ${p.observations} requested.`:status==='stale'?`Latest common observation is ${age} days old, exceeding the requested threshold.`:"No numeric observations for one or more countries.",countries,commonPeriods:common,latestCommonPeriod:latest??null,ageDays:age,checkedAt:now.toISOString(),checks:{country:true,measure:true,frequency:true,unitsAndScale:true,adjustment:series.every(e=>e.adjustment!=='not_reported')?'confirmed':'not_reported_for_registered_measure',transformation:true,commonCoverage:common.length>=p.observations}};
     }catch(error){
       const status=error instanceof VerificationError?error.reason:error instanceof AccessError?error.kind:"lookup_failed";

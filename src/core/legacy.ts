@@ -4,7 +4,7 @@ import {AccessError,accessGovernor,providerFor} from "./access";
 
 export async function checkedJson(url:string|URL,init?:RequestInit):Promise<any>{
   const target=new URL(url),provider=providerFor(target),res=await fetchRetry(target,init);
-  const text=await res.text();
+  let text:string;try{text=await res.text();}catch{await accessGovernor().record(provider,'unavailable');throw new AccessError(provider,'unavailable','Response body failed or timed out; no partial data returned.');}
   if(text.length>20_000_000)throw new AccessError(provider,"invalid_response","Response exceeds 20 MB; narrow the query.");
   let value:any;try{value=JSON.parse(text);}catch{await accessGovernor().record(provider,"invalid_response");throw new AccessError(provider,"invalid_response","Expected JSON, received malformed or non-JSON data.");}
   const failure=provider==="FRED"?value.error_code:provider==="BEA"?value?.BEAAPI?.Results?.Error??value?.BEAAPI?.Error:provider==="BLS"&&value.status!=="REQUEST_SUCCEEDED"?value.message??"missing status":undefined;

@@ -87,15 +87,16 @@ export class LayeredCache {
     key: string,
     ttlSeconds: number,
     compute: () => Promise<T>,
+    refresh = false,
   ): Promise<T> {
-    const localHit = await this.l1.get(key);
+    const localHit = refresh ? null : await this.l1.get(key);
     if (localHit !== null) return localHit;
 
     const pending = this.inFlight.get(key);
     if (pending) return pending;
 
     const work = (async () => {
-      if (this.l2) {
+      if (this.l2 && !refresh) {
         try {
           const entry=this.l2.getEntry?await this.l2.getEntry(key):undefined;
           const sharedHit = this.l2.getEntry?entry?.value??null:await this.l2.get(key);

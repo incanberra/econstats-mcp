@@ -3,6 +3,10 @@ import { buildImfDataUrl, formatImfCsv, formatImfDatasets, formatImfStructure } 
 import { EconStatsCoreClient } from "../src/core/client";
 
 const url = new URL("https://api.imf.org/external/sdmx/2.1/data/IMF.STA,CPI/USA.CPI._T.IX.M");
+test('IMF bounds Cartesian selections and rejects reversed ranges before downloading',()=>{
+ expect(()=>buildImfDataUrl({databaseId:'CPI',seriesKey:Array.from({length:51},(_,i)=>'A'+i).join('+')+'.CPI._T.IX.M'})).toThrow('50 series');
+ expect(()=>buildImfDataUrl({databaseId:'CPI',seriesKey:'USA.CPI._T.IX.M',startPeriod:'2026-09',endPeriod:'2026-01'})).toThrow('start_period');
+});
 const header = "DATAFLOW,COUNTRY,INDEX_TYPE,COICOP_1999,TYPE_OF_TRANSFORMATION,FREQUENCY,TIME_PERIOD,OBS_VALUE,SCALE,UNIT,REFERENCE_PERIOD,STATUS,SERIES_NAME\n";
 const csv = header +
   'IMF.STA:CPI(5.0.0),USA,CPI,_T,IX,M,2024-M03,141.9,0,IX,2010A,E,"Consumer prices, all items"\n' +

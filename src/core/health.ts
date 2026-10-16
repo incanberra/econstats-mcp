@@ -33,6 +33,7 @@ export async function connectionHealth(keys:Keys,sources:Provider[]= [...PROVIDE
             BIS:"https://stats.bis.org/api/v2/structure/dataflow/BIS/WS_CBPOL/+?references=none&format=sdmx-2.1",
             EUROSTAT:"https://ec.europa.eu/eurostat/api/dissemination/sdmx/2.1/dataflow/ESTAT/PRC_HICP_MINR/1.0?references=none&compressed=true",
             ECB:"https://data-api.ecb.europa.eu/service/dataflow/ECB/FM/latest?references=none",
+            ABS:"https://data.api.abs.gov.au/rest/dataflow/ABS/ANA_AGG/latest?references=none",
           };
           const text=provider==="EUROSTAT"?await requestEurostat(urls[provider]!):await(await providerFetch(urls[provider]!,{headers:{Accept:"application/vnd.sdmx.structure+xml;version=2.1"}})).text();
           if(text.length>20_000_000||!/<(?:[\w.-]+:)?Structure[\s>]/.test(text)||!text.includes("Dataflow"))throw new AccessError(provider,"invalid_response","Unexpected SDMX metadata response.");

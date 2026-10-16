@@ -2,7 +2,7 @@ import {mkdir} from "node:fs/promises";
 import {join} from "node:path";
 import {atomicWrite,readStored,storageDirectory,storagePath,withFileLock} from "./storage";
 
-export const PROVIDERS=["FRED","BLS","BEA","IMF","OECD","EUROSTAT","BIS","EIA","WORLD_BANK","ECB"] as const;
+export const PROVIDERS=["FRED","BLS","BEA","IMF","OECD","EUROSTAT","BIS","EIA","WORLD_BANK","ECB","ABS"] as const;
 export type Provider=typeof PROVIDERS[number];
 export type AccessKind="healthy"|"missing_key"|"rejected_key"|"rate_limited"|"budget_exhausted"|"unavailable"|"request_rejected"|"invalid_response"|"not_checked";
 export class AccessError extends Error {
@@ -11,6 +11,7 @@ export class AccessError extends Error {
 type State={started:number;used:number;blockedUntil:number;status:AccessKind;checkedAt?:string;lastSuccess?:string;httpStatus?:number};
 export function providerFor(url:URL):Provider {
   const hosts:Record<string,Provider>={"api.stlouisfed.org":"FRED","api.bls.gov":"BLS","apps.bea.gov":"BEA","api.imf.org":"IMF","sdmx.oecd.org":"OECD","ec.europa.eu":"EUROSTAT","stats.bis.org":"BIS","api.eia.gov":"EIA","api.worldbank.org":"WORLD_BANK","data-api.ecb.europa.eu":"ECB"};
+  hosts['data.api.abs.gov.au']='ABS';
   const provider=hosts[url.hostname];if(!provider)throw new Error("Unsupported economic API host.");return provider;
 }
 export class RequestGovernor {

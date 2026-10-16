@@ -1,7 +1,7 @@
 {
   "name": "econstats-mcp",
-  "version": "2.7.0",
-  "description": "Economic data MCP server — FRED, BLS, BEA, IMF, OECD, Eurostat, BIS, EIA, World Bank, ECB with verified source selection",
+  "version": "3.0.0",
+  "description": "Economic data MCP server with ABS, structured observations, revision tracking and verified source selection",
   "type": "module",
   "bin": {
     "econstats-mcp": "./src/index.ts"
@@ -9,7 +9,8 @@
   "scripts": {
     "start": "bun src/index.ts",
     "dev": "bun --watch src/index.ts",
-    "test": "bun test"
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
   },
   "keywords": [
     "mcp",
@@ -43,5 +44,10 @@
     "fast-xml-parser": "^5.11.2",
     "i18n-iso-countries": "^7.14.0",
     "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.3",
+    "@types/node": "^26.6.5",
+    "typescript": "^7.0.2"
   }
 }
