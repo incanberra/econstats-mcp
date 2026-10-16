@@ -21,7 +21,7 @@ curl -fsSL https://bun.sh/install | bash
 # Install from this fork; the npm econstats-mcp package is currently unpublished.
 git clone https://github.com/incanberra/econstats-mcp.git
 cd econstats-mcp
-git switch add-eia
+git switch improve-data-access
 bun install --frozen-lockfile --ignore-scripts
 
 # Save keys for the providers you use in a local .env (excluded from Git).
@@ -270,12 +270,36 @@ For comparisons the selector requests extra history to accommodate country publi
 
 The registry is not an exhaustive catalogue search. Some recognised measures/geographies still require provider discovery; the selector declines an exact recommendation rather than inventing a mapping. Checks sample available observations, not all historical vintages. Provider caches may be reused; retrieval/check timestamps do not guarantee that a release page has already propagated to its API. A preferred source is never silently replaced. Source recommendations are not evidence for economic figures: retrieve and cite the actual data using the returned plan.
 
+## Connection health and request budgets
+
+`connection_health` reports credential readiness, last observed access status, HTTP status, hourly request usage/remaining budget and any provider cooldown. Default `probe:false` makes no network requests and does not imply a live connection test. With `probe:true`, specify up to three sources per call, for example `{"sources":["FRED","BEA","EIA"],"probe":true}`. Probes bypass data caches and consume the normal request budget. They test an endpoint and credentials, not every dataset's definition, freshness or coverage.
+
+Missing keys, rejected keys, rate limits, local budget exhaustion, outages/timeouts, rejected requests and malformed responses are separate statuses. Keys and authenticated URLs are never included in health output. HTTP 429 starts a provider cooldown using `Retry-After` (seconds or an HTTP date), defaulting to one minute; further uncached calls are stopped locally during that cooldown. Application-level errors such as BLS daily thresholds and BEA credential rejection are also diagnosed. Temporary network/5xx failures in older adapters can be retried at most twice; each attempt consumes budget, while 429/authentication/parameter failures are not immediately retried.
+
+Every provider has a configurable **local hourly request budget**, defaulting to 60 for OECD and 300 for other providers. These are local operational caps, not promises about provider quotas: other applications/IP users and upstream daily limits are not counted. OECD metadata and probes count too, making its cap conservative relative to [OECD's published download limit](https://www.oecd.org/en/data/insights/data-explainers/2024/11/Api-best-practices-and-recommendations.html). Set `ECONSTATS_BUDGET_<PROVIDER>_PER_HOUR` to a nonnegative integer; zero disables that provider's local cap. Provider names are `FRED`, `BLS`, `BEA`, `IMF`, `OECD`, `EUROSTAT`, `BIS`, `EIA`, `WORLD_BANK` and `ECB`.
+
+Budgets and cooldowns persist under the local cache directory with atomic updates and cross-process locks. They are shared by MCP processes using that directory. A budget-storage failure stops an upstream call rather than allowing untracked requests. Remote hosts/other cache directories have separate budgets; Redis shares data caching, not budget counters. With disk caching disabled, budgets/cooldowns exist only in the current process. Cached valid data remain available during a cooldown and do not consume requests.
+
+## World Bank, ECB and legacy adapter reliability
+
+`worldbank_get_data` retrieves all pages for a bounded range, checks page totals/updates and rejects changing, duplicated or incomplete pagination instead of returning partial success. Default range is the current year and preceding 59 years; explicit bounds allow up to 150 years and 50 exact country/aggregate codes. Results retain country IDs/names, indicator definitions, reported units/status, missing-value counts, source update date, all-page totals and exact query citations. Coverage is World Development Indicators (`source=2`); missing units are disclosed rather than guessed.
+
+`worldbank_search` downloads/caches the complete WDI indicator catalogue and searches it locally, prioritising indicator names/codes over description matches. It does not send an unsupported text-search parameter to the API. Up to 30 matches are shown.
+
+`ecb_get_data` accepts fully specified keys (up to 50 combinations), rejects wildcards, decodes SDMX-JSON dimension/attribute indices, keeps country/series results separate and retains units, power-of-ten scales, observation flags, dates and exact citations. It makes no automatic unit conversion. The supported JSON media header and `format=jsondata` are used together.
+
+FRED/BLS/BEA, World Bank and ECB return MCP tool errors for failed requests or invalid responses. HTTP/application errors are rejected before writing successful-data caches. BLS and BEA citations include retrieval dates; BEA preserves row units/scales and discloses the existing 15-line display cap. BEA's default `LAST5` is resolved to five explicit years. Provider request echoes/private credential fields are removed before legacy JSON is cached.
+
+References: [World Bank pagination and call structures](https://datahelpdesk.worldbank.org/knowledgebase/articles/898581-api-basic-call-structures), [World Bank indicator queries](https://datahelpdesk.worldbank.org/knowledgebase/articles/898599-indicator-api-queries), [ECB API overview](https://data.ecb.europa.eu/help/api/overview).
+
 ## Caching
 
 The server now uses a two-layer cache:
 
 - L1: in-process memory cache for hot repeated queries in a single MCP process
-- L2: optional shared Redis cache for cross-process or hosted deployments
+- L2: a persistent disk cache by default, or shared Redis when configured
+
+The default disk directory is `~/.cache/econstats` (on Windows, under the user's home directory). Set `ECONSTATS_CACHE_DIR` to choose another directory, or `ECONSTATS_DISK_CACHE=false` to disable local persistence. Public validated responses/metadata use hashed filenames, atomic writes and source TTLs; expired/corrupt entries are ignored. Data retrieval timestamps stay with cached results, so a cache hit does not claim a new source download. The cache is not a revision/vintage archive. Local persistence shares responses across MCP restarts; simultaneous cache misses in separate processes can still each download data, while budget reservations remain shared/locked.
 
 If you are running a shared MCP endpoint for OpenBB users, set these optional env vars:
 
@@ -283,7 +307,9 @@ If you are running a shared MCP endpoint for OpenBB users, set these optional en
 |-----|----------|---------|
 | `UPSTASH_REDIS_REST_URL` | Optional | Shared cache backend URL |
 | `UPSTASH_REDIS_REST_TOKEN` | Optional | Shared cache backend token |
-| `CACHE_NAMESPACE` | Optional | Cache prefix, defaults to `econstats:v2` |
+| `CACHE_NAMESPACE` | Optional | Redis cache prefix, defaults to `econstats:v3` |
+| `ECONSTATS_CACHE_DIR` | Optional | Local disk-cache and request-budget directory |
+| `ECONSTATS_DISK_CACHE` | Optional | Set `false` to disable local persistence |
 | `PREFETCH_HOT_SERIES` | Optional | Set to `true` only for long-lived hosted processes |
 
 TTL policy is source-aware:
@@ -303,11 +329,12 @@ The cache layer also deduplicates in-flight requests, so a burst of identical Op
 
 Startup prefetch is disabled by default because short-lived stdio clients can create unnecessary upstream traffic. Turn it on only when you are running a persistent shared MCP service.
 
-## Tools (26)
+## Tools (27)
 
 | Tool | Description |
 |------|-------------|
 | `select_source` | Recommend exact-measure sources with reasons, retrieval plans and optional verified coverage |
+| `connection_health` | Inspect credentials, access status, budgets/cooldowns; optionally probe live endpoints |
 | `fred_search` | Search FRED series by keyword |
 | `fred_get_series` | Fetch FRED data with transformations (YoY%, change, etc.) |
 | `bls_get_series` | Fetch BLS data with pre-computed YoY% and monthly changes |

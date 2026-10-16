@@ -1,4 +1,5 @@
 import { parse } from "csv-parse/sync";
+import {providerFetch} from "./access";
 import { XMLParser } from "fast-xml-parser";
 
 const BASE = "https://sdmx.oecd.org/public/rest";
@@ -144,7 +145,7 @@ export function formatOecdCsv(csv: string, url: URL, limit = 36): string {
 }
 
 export async function requestOecd(url: string | URL, metadata = false): Promise<string> {
-  const res = await fetch(url,{headers:{Accept:metadata ? "application/vnd.sdmx.structure+xml;version=2.1" : "text/csv"},signal:AbortSignal.timeout(30000)});
+  const res = await providerFetch(url,{headers:{Accept:metadata ? "application/vnd.sdmx.structure+xml;version=2.1" : "text/csv"},signal:AbortSignal.timeout(30000)});
   if (res.status === 429) throw new Error(`OECD rate limit reached (60 downloads/hour). Retry later${res.headers.get("Retry-After") ? `; Retry-After: ${res.headers.get("Retry-After")}` : ""}.`);
   if (res.status === 413) throw new Error("OECD rejected the query size or lastNObservations parameter. Specify start_period and end_period and narrow the series_key.");
   if (res.status === 404) throw new Error("OECD dataset/selection not found. Recheck discovery, version and series dimensions.");
