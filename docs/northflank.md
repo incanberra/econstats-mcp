@@ -1,5 +1,10 @@
 # Set up EconStats on Northflank
 
+**Existing deployment:** the GitHub deployment and ChatGPT OAuth connection are
+already working. See [the README's current cloud deployment](../README.md#cloud-deployment-northflank-and-chatgpt)
+for the live address, provider-key instructions and verified status. The steps
+below are for creating a new service, not for replacing the existing OAuth setup.
+
 This gets your server online. **Connecting it to ChatGPT needs a separate sign-in
 setup afterwards.** You can leave that until the server has its web address.
 

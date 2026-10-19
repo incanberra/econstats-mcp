@@ -2,12 +2,70 @@
 
 Economic data MCP server with an economist's methodology guide. Connects FRED, BLS, BEA, IMF, OECD, Eurostat, BIS, EIA, World Bank, ECB, ABS and UN Comtrade to any MCP-compatible client.
 
-## Deploy on Northflank
+## Cloud deployment: Northflank and ChatGPT
 
-See [the Northflank deployment guide](docs/northflank.md) for the Docker build,
-port and health-check settings, runtime secrets, OAuth for ChatGPT, bearer-token
-clients, and the memory-only versus persistent-history choice. Hosted HTTP serves
-`/mcp` and requires authentication. Local stdio installations work as before.
+EconStats is deployed from this GitHub repository to a Northflank combined build
+and deployment service. ChatGPT connects to the hosted `/mcp` endpoint using
+Auth0 OAuth. Sign-in and discovery of all **35 tools** were verified on
+19 October 2026; public health and OAuth resource metadata were checked again
+on 20 October 2026 and returned HTTP 200.
+
+| Setting | Current deployment |
+| --- | --- |
+| Northflank project / service | `default` / `econstatsmcp` |
+| MCP endpoint | https://p01--econstatsmcp--yg9w56v8wz4m.code.run/mcp |
+| Public liveness check | https://p01--econstatsmcp--yg9w56v8wz4m.code.run/health |
+| GitHub deployment branch | `codex/northflank-deployment` |
+| Pull request | [#11](https://github.com/incanberra/econstats-mcp/pull/11), open draft at this checkpoint |
+| Build / port | Root `Dockerfile`; container port `3000`; HTTPS provided by Northflank |
+| Authentication | `MCP_AUTH_MODE=oauth`; Auth0 JWT access tokens; scope `econstats:read`; explicit user allowlist |
+| Storage | Memory-only by default; cache, budgets and observed revision history reset on restart |
+
+The deployment branch remains the live source until PR #11 is merged. The
+deployment changes are not yet on `main`. The container uses pinned Bun 1.3.10,
+runs as a non-root user and creates a separate stateless MCP server/transport per
+request. It also provides request limits, graceful shutdown and connection logs
+that omit credentials. GitHub checks cover regressions and the production image.
+Local stdio clients remain available independently of the cloud service.
+
+### Add or update cloud API keys
+
+Open the Northflank service's **Environment** page, choose **Continue → Edit →
+Add variable**, then enter each provider key you use:
+
+`FRED_API_KEY`, `BEA_API_KEY`, `EIA_API_KEY`, optional `BLS_API_KEY`, and
+`COMTRADE_API_KEY` for authenticated Comtrade access.
+
+Use the key itself as the value, without surrounding quotes. Preserve the existing
+OAuth settings, select **Update & restart**, and wait for **Running**. Provider
+keys belong in runtime variables, not build arguments, the repository or ChatGPT
+messages. A local `.env` file is excluded from the Docker build and is **not
+automatically copied to Northflank**.
+
+Check providers through the **cloud-connected** EconStats app, for example:
+
+```json
+{"sources":["FRED","BLS","BEA"],"probe":true}
+```
+
+Use that object with `connection_health`; check EIA and Comtrade separately if
+configured. A fresh local MCP process successfully loaded a BLS key and completed
+a live BLS probe on 20 October 2026. That does **not** verify the cloud BLS key or
+other cloud provider credentials. Public `/health` only confirms process liveness.
+
+### If ChatGPT authentication succeeds but discovery fails
+
+The deployed service initially returned HTTP 403 with diagnostic reason
+`subject_not_allowed`: `MCP_OAUTH_SUBJECTS` contained only `auth0`. Saving the
+**complete Auth0 User ID**, including the `|` and everything after it, fixed the
+problem. Restart the service after changing runtime variables, then use
+ChatGPT's **Refresh tools**. Confirm successful `initialize` and `tools/list`
+responses in Northflank logs before starting a new chat. Do not remove the
+allowlist or disable authentication to bypass this error.
+
+See the [short Northflank setup guide](docs/northflank.md),
+[full hosting and OAuth reference](docs/northflank-reference.md), and
+[deployment checkpoint](docs/cloud-deployment-checkpoint-2026-10-20.md).
 
 ## Data guide
 
