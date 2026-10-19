@@ -7,7 +7,7 @@ export type AuthConfig =
   | { mode: "oauth"; issuer: string; audience: string; jwksUrl: string; publicUrl: string; scope: string; subjects: string[] };
 
 export class AuthFailure extends Error {
-  constructor(public status: 401 | 403) { super("Access denied"); }
+  constructor(public status: 401 | 403, public reason: string = "invalid_token") { super("Access denied"); }
 }
 
 export function httpsUrl(value: string | undefined, name: string): string {
@@ -65,7 +65,7 @@ export function createVerifier(config: AuthConfig, keys?: JWTVerifyGetKey) {
   return async (authorization: string | undefined): Promise<void> => {
     if (config.mode === "none") return;
     const match = /^Bearer ([^\s]+)$/i.exec(authorization ?? "");
-    if (!match || match[1].length > 16384) throw new AuthFailure(401);
+    if (!match || match[1].length > 16384) throw new AuthFailure(401, "missing_or_malformed_authorization");
     if (config.mode === "bearer") {
       const actual = createHash("sha256").update(match[1]).digest();
       if (!timingSafeEqual(actual, expected!)) throw new AuthFailure(401);
@@ -78,8 +78,19 @@ export function createVerifier(config: AuthConfig, keys?: JWTVerifyGetKey) {
         algorithms: ["RS256", "PS256", "ES256", "EdDSA"],
         requiredClaims: ["exp", "sub", "iat"], clockTolerance: 5,
       }));
-    } catch { throw new AuthFailure(401); }
+    } catch (error) {
+      // Log only fixed diagnostic categories, never tokens or claim values.
+      const code = (error as { code?: string }).code;
+      const claim = (error as { claim?: string }).claim;
+      const reason = code === "ERR_JWT_CLAIM_VALIDATION_FAILED" && ["iss", "aud", "exp", "sub", "iat"].includes(claim ?? "")
+        ? `invalid_claim_${claim}`
+        : code === "ERR_JWT_EXPIRED" ? "expired_token"
+        : code === "ERR_JWKS_TIMEOUT" ? "jwks_timeout"
+        : "invalid_token";
+      throw new AuthFailure(401, reason);
+    }
     const scopes = typeof payload.scope === "string" ? payload.scope.split(" ") : [];
-    if (!config.subjects.includes(payload.sub!) || !scopes.includes(config.scope)) throw new AuthFailure(403);
+    if (!config.subjects.includes(payload.sub!)) throw new AuthFailure(403, "subject_not_allowed");
+    if (!scopes.includes(config.scope)) throw new AuthFailure(403, "required_scope_missing");
   };
 }

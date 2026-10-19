@@ -55,12 +55,20 @@ export function createHttpServer(factory: () => McpServer, config: HttpConfig, v
     res.setHeader("Cache-Control", "no-store");
     res.setHeader("X-Content-Type-Options", "nosniff");
     const pathname = (req.url ?? "/").split("?", 1)[0];
+    let diagnostic = "response";
+    let operation = "request";
+    if (pathname === "/mcp") {
+      const started = Date.now();
+      res.once("finish", () => {
+        console.error(`[http] MCP ${operation} status=${res.statusCode} reason=${diagnostic} duration_ms=${Date.now() - started}`);
+      });
+    }
     if (pathname === "/health" && ["GET", "HEAD"].includes(req.method ?? "")) {
       res.writeHead(draining ? 503 : 200, { "Content-Type": "text/plain" });
       res.end(draining ? "draining" : "ok"); return;
     }
     const origin = req.headers.origin;
-    if (origin && !config.origins.has(origin)) { reply(res, 403, "Origin not allowed"); return; }
+    if (origin && !config.origins.has(origin)) { diagnostic = "origin_not_allowed"; reply(res, 403, "Origin not allowed"); return; }
     if (origin) {
       res.setHeader("Access-Control-Allow-Origin", origin);
       res.setHeader("Vary", "Origin");
@@ -102,6 +110,8 @@ export function createHttpServer(factory: () => McpServer, config: HttpConfig, v
       if (req.method !== "POST") { res.setHeader("Allow", "POST, OPTIONS"); reply(res, 405, "Use POST for stateless MCP"); return; }
       if (!/^application\/json(?:\s*;|$)/i.test(req.headers["content-type"] ?? "")) { reply(res, 415, "Use application/json"); return; }
       const parsed = await body(req);
+      const method = (parsed as { method?: unknown } | null)?.method;
+      if (typeof method === "string" && ["initialize", "notifications/initialized", "tools/list", "tools/call", "ping"].includes(method)) operation = method;
       if (res.destroyed || res.writableEnded) return;
       // A fresh transport AND server per request avoid reused-transport initialization
       // failures and cross-client response mixups. Data caches/budgets remain shared.
@@ -112,6 +122,7 @@ export function createHttpServer(factory: () => McpServer, config: HttpConfig, v
     } catch (error) {
       if (res.headersSent || res.destroyed) return;
       if (error instanceof AuthFailure) {
+        diagnostic = error.reason;
         res.setHeader("WWW-Authenticate", challenge(config.auth, error.status));
         reply(res, error.status, error.status === 403 ? "Access denied" : "Authentication required");
       } else if (error === 413 || error === 400) reply(res, error, error === 413 ? "Request too large" : "Invalid JSON");
