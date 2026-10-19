@@ -2,6 +2,13 @@
 
 Economic data MCP server with an economist's methodology guide. Connects FRED, BLS, BEA, IMF, OECD, Eurostat, BIS, EIA, World Bank, ECB, ABS and UN Comtrade to any MCP-compatible client.
 
+## Deploy on Northflank
+
+See [the Northflank deployment guide](docs/northflank.md) for the Docker build,
+port and health-check settings, runtime secrets, OAuth for ChatGPT, bearer-token
+clients, and the memory-only versus persistent-history choice. Hosted HTTP serves
+`/mcp` and requires authentication. Local stdio installations work as before.
+
 ## Data guide
 
 See the [EconStats data guide](docs/data-guide.md) for provider coverage, key datasets and identifiers, data types, example research requests, and access and revision limits. It distinguishes catalogue discovery from working data retrieval and explains the TiVA service and date-range requirements.

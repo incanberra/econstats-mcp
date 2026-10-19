@@ -12,9 +12,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { createServer } from "node:http";
-import { randomUUID } from "node:crypto";
+import { createHttpServer, httpConfig, installShutdownHandlers, configuredPort } from "./hosting/http";
 import { z } from "zod";
 import { EconStatsCoreClient } from "./core/client";
 import { MEASURES, SOURCES } from "./core/selection";
@@ -47,6 +45,7 @@ async function jsonResult(work:()=>Promise<any>){
 }
 // ── Server ──────────────────────────────────────────────────────────────
 
+function createMcpServer() {
 const server = new McpServer({
   name: "econstats",
   version: "3.1.0",
@@ -458,52 +457,24 @@ server.tool('comtrade_get_availability','Check final merchandise data availabili
 server.tool('comtrade_get_data','Retrieve bounded final merchandise trade for exact reporter, partner, HS products and periods in classic mode (partner2=0, customs=C00, transport=0). Values are USD, netWgt is kg; quantity uses reported units. Preview is always marked incomplete/unverified; authenticated requires a key and never falls back silently. Up to 12 requests, 500 rows per period; no wildcard downloads or automatic pagination. Native flags and HS editions are preserved. fresh=true checks revisions; use revision_history for observed changes.',
  {...comtradeSelection,partner_code:z.number().int().min(0).max(999).describe('Comtrade partner code; 0 means World'),product_codes:z.array(z.string().regex(/^(TOTAL|\d{2}|\d{4}|\d{6})$/)).min(1).max(10),flow_code:z.enum(['M','X','RM','RX']),fields:z.array(z.enum(['primaryValue','netWgt','qty'])).min(1).max(3).default(['primaryValue']),max_records:z.number().int().min(1).max(500).default(500),fresh:z.boolean().default(false)},async(args)=>data('comtrade_get_data',args));
 
-const PORT = parseInt(process.env.MCP_PORT || process.env.PORT || "0");
+return server;
+}
+
+const PORT = configuredPort(process.env);
 
 if (PORT > 0) {
-  // Streamable HTTP mode — for OpenBB Workspace
-  // Use stateless mode so each request is independent
-  const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: undefined,
-  });
-  await server.connect(transport);
-
-  const httpServer = createServer(async (req, res) => {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, mcp-session-id");
-    res.setHeader("Access-Control-Expose-Headers", "mcp-session-id");
-
-    if (req.method === "OPTIONS") {
-      res.writeHead(204);
-      res.end();
-      return;
-    }
-
-    if (req.url === "/health") {
-      res.writeHead(200, { "Content-Type": "text/plain" });
-      res.end("ok");
-      return;
-    }
-
-    try {
-      await transport.handleRequest(req, res);
-    } catch (err) {
-      if (!res.headersSent) {
-        res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: String(err) }));
-      }
-    }
-  });
-
-  httpServer.listen(PORT, () => {
-    console.error(`EconStats MCP v3 running on http://localhost:${PORT} (Streamable HTTP)`);
+  const config = httpConfig(process.env);
+  const httpServer = createHttpServer(createMcpServer, config);
+  installShutdownHandlers(httpServer);
+  httpServer.listen(PORT, config.host, () => {
+    console.error(`EconStats MCP v3 running on port ${PORT}/mcp (Streamable HTTP; ${config.auth.mode})`);
     if (process.env.PREFETCH_HOT_SERIES === "true") {
       client.prefetchReleaseDaySeries();
     }
   });
 } else {
   // Stdio mode — for Claude Desktop/Code
+  const server = createMcpServer();
   const transport = new StdioServerTransport();
   server.connect(transport).then(() => {
     console.error("EconStats MCP v3 running on stdio");
