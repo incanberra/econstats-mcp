@@ -13,6 +13,8 @@ import type {Provider} from './access';
 import type {Retrieval} from './selection';
 import {fetchComtradeData,validateComtradeData,type ComtradeDataParams} from './comtrade';
 import {AccessError} from './access';
+import {fetchPortwatch,validatePortwatch} from './portwatch';
+import {fetchFaostat,validateFaostat} from './faostat';
 
 export type Keys={FRED_KEY?:string;BLS_KEY?:string;BEA_KEY?:string;EIA_KEY?:string;COMTRADE_KEY?:string};
 function requireKey(key:string|undefined,provider:string):asserts key is string {if(!key)throw new Error(`${provider} API key is not configured.`);}
@@ -125,6 +127,12 @@ export function parseEcbData(data:any,url:URL,p:any,retrievedAt:string):DataResu
 
 export async function fetchStructured(r:Retrieval,keys:Keys,cache:LayeredCache,fresh=false):Promise<DataResult>{
   const a=r.arguments;
+  if(r.tool==='portwatch_get_data'){
+    validatePortwatch(a as any);return cache.getOrCompute(`public:portwatch:v1:${JSON.stringify(a)}`,3600,()=>fetchPortwatch(cache,a as any),fresh);
+  }
+  if(r.tool==='faostat_get_data'){
+    validateFaostat(a as any);return cache.getOrCompute(`public:faostat:v1:${JSON.stringify(a)}`,3600,async()=>fetchFaostat(a as any),fresh);
+  }
   if(r.tool==='comtrade_get_data'){
     const params=a as ComtradeDataParams;validateComtradeData(params);
     if(params.access_mode==='authenticated'&&!keys.COMTRADE_KEY)throw new AccessError('COMTRADE','missing_key','Set COMTRADE_API_KEY locally, or explicitly choose preview.');

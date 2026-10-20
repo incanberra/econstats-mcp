@@ -90,12 +90,12 @@ test("multiple real SDK clients can initialize, discover and call tools concurre
       await client.connect(transport);
       expect(client.getInstructions()).toContain("SOURCE ROUTING");
       const list = await client.listTools();
-      expect(list.tools).toHaveLength(35);
+      expect(list.tools).toHaveLength(41);
       const result = await client.callTool({ name: "connection_health", arguments: { sources: ["FRED"], probe: false } });
       expect(result.isError).not.toBe(true);
       expect(JSON.stringify(result)).not.toContain(token);
       // A second call catches accidental reuse of a stateless HTTP transport.
-      expect((await client.listTools()).tools).toHaveLength(35);
+      expect((await client.listTools()).tools).toHaveLength(41);
     } finally { await client.close(); }
   }));
 }, 20000);

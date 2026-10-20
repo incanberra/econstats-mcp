@@ -1,6 +1,27 @@
 # econstats-mcp
 
-Economic data MCP server with an economist's methodology guide. Connects FRED, BLS, BEA, IMF, OECD, Eurostat, BIS, EIA, World Bank, ECB, ABS and UN Comtrade to any MCP-compatible client.
+Economic data MCP server with an economist's methodology guide. Connects FRED, BLS, BEA, IMF, OECD, Eurostat, BIS, EIA, World Bank, ECB, ABS, UN Comtrade, IMF PortWatch and FAOSTAT to any MCP-compatible client.
+
+## Version 3.2: shipping, food and fertiliser security
+
+Adds **six tools**, bringing the server to **41 tools across 14 providers**:
+
+- **IMF PortWatch:** search ports/chokepoints, inspect fields and retrieve daily
+  vessel calls, estimated port shipment volumes and chokepoint vessel capacity.
+- **FAOSTAT:** discover installed domains/codes and query official public-data
+  snapshots for crop/livestock production, food balances and fertilisers by
+  nutrient/product. Annual data from 1990 onward where available; FBS from 2010.
+
+Neither addition needs an API key. Docker prepares FAOSTAT's searchable snapshots
+at build time so hosted queries fit the small Northflank runtime. Snapshots
+retain release/download dates and do not update during a tool call. A build
+without cache downloads newer releases; `fresh=true` only bypasses result caches.
+For local stdio, run `bun run build:faostat` once before using the FAOSTAT tools.
+
+See [testing prompts, access details and rollback instructions](docs/security-data.md).
+The previous working 35-tool source is saved as GitHub branch
+`backup/working-before-portwatch-faostat-2026-10-20` and tag
+`working-before-portwatch-faostat-2026-10-20` at commit `af2c77b`.
 
 ## Cloud deployment: Northflank and ChatGPT
 
@@ -73,9 +94,9 @@ See the [EconStats data guide](docs/data-guide.md) for provider coverage, key da
 
 ## Version 3: ABS, structured data and observed revisions
 
-Version 3.1 adds [UN Comtrade discovery, availability and bounded merchandise trade retrieval](docs/comtrade.md). The server exposes 35 tools. Preview access requires no key and always reports unverified completeness; authenticated retrieval uses an optional local `COMTRADE_API_KEY`. Installations now follow the maintained `main` branch.
+Version 3.1 added [UN Comtrade discovery, availability and bounded merchandise trade retrieval](docs/comtrade.md). Preview access requires no key and always reports unverified completeness; authenticated retrieval uses an optional local `COMTRADE_API_KEY`. The cloud service follows `codex/northflank-deployment` as described above; local installations may follow `main`.
 
-All twelve direct observation tools return MCP `structuredContent` using the same
+All fourteen direct observation tools return MCP `structuredContent` using the same
 `schemaVersion: "1.0"` contract. The accompanying text is rendered from those exact
 records. Search/catalogue tools keep their existing interfaces unless noted.
 This is a major version because direct text formatting and BLS presentation changed.

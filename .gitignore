@@ -4,3 +4,4 @@ node_modules/
 !.env.example
 !.env.*.example
 *.log
+faostat-data/

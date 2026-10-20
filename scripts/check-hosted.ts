@@ -22,10 +22,15 @@ await Promise.all(Array.from({ length: 2 }, async (_, n) => {
   const client = new Client({ name: `econstats-hosted-check-${n}`, version: "1" });
   try {
     await client.connect(new StreamableHTTPClientTransport(endpoint, { requestInit: { headers: { Authorization: `Bearer ${token}` } } }));
-    if ((await client.listTools()).tools.length !== 35) throw new Error("Expected 35 tools.");
+    if ((await client.listTools()).tools.length !== 41) throw new Error("Expected 41 tools.");
     const result = await client.callTool({ name: "connection_health", arguments: { sources: ["FRED"], probe: false } });
     if (result.isError) throw new Error("Offline provider readiness call failed.");
-    if ((await client.listTools()).tools.length !== 35) throw new Error("Repeated tool discovery failed.");
+    if ((await client.listTools()).tools.length !== 41) throw new Error("Repeated tool discovery failed.");
+    const domains = await client.callTool({ name: "faostat_list_domains", arguments: {} });
+    const installed = (domains.structuredContent as any)?.domains;
+    if (domains.isError || installed?.length !== 4 || installed.some((d: any) => !d.installed)) throw new Error("Production FAOSTAT snapshots are missing.");
+    const wheat = await client.callTool({ name: "faostat_get_data", arguments: {domain:"QCL",area_codes:["10"],item_codes:["15"],element_codes:["5510"],start_year:2023,end_year:2023} });
+    if (wheat.isError || !(wheat.structuredContent as any)?.coverage?.returnedObservations) throw new Error("Production FAOSTAT query failed.");
   } finally { await client.close(); }
 }));
 console.log("Hosted checks passed: health, authentication, concurrent clients, tool discovery and offline readiness.");

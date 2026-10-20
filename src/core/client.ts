@@ -15,6 +15,9 @@ import {ABS_CATALOG_URL,absCatalogue,absStructure,buildAbsStructureUrl,requestAb
 import {dataSeries,finishResult} from './result';
 import type {Retrieval} from './selection';
 import {comtradeReferences,comtradeProducts,comtradeAvailability,type ComtradeReference,type ComtradeClassification,type ComtradeSelection} from './comtrade';
+import {portwatchLocations,portwatchMetadata,type PortwatchDataset} from './portwatch';
+import {faostatDomains,faostatCodes} from './faostat';
+import type {FaostatDomain} from './faostat-catalog';
 
 type FredUnits = "lin" | "pc1" | "pch" | "ch1" | "chg";
 
@@ -108,6 +111,10 @@ export class EconStatsCoreClient {
 
   async getStructuredData(request:Retrieval,fresh=false){return this.revisions.track(await fetchStructured(request,this.env,this.cache,fresh));}
   async revisionHistory(seriesId:string,limit=10){return this.revisions.history(seriesId,limit);}
+  async portwatchListLocations(dataset:PortwatchDataset,query?:string,country?:string,offset=0,limit=30){return portwatchLocations(this.cache,dataset,query,country,offset,limit);}
+  async portwatchGetMetadata(dataset:PortwatchDataset){return portwatchMetadata(this.cache,dataset);}
+  async faostatListDomains(){return faostatDomains();}
+  async faostatListCodes(domain:FaostatDomain,dimension:'area'|'item'|'element',query?:string,offset=0,limit=30){return faostatCodes(domain,dimension,query,offset,limit);}
   async comtradeReferences(reference:ComtradeReference,query?:string,offset=0,limit=50){return comtradeReferences(this.cache,reference,query,offset,limit);}
   async comtradeProducts(classification:ComtradeClassification,query?:string,offset=0,limit=50){return comtradeProducts(this.cache,classification,query,offset,limit);}
   async comtradeAvailability(params:ComtradeSelection,fresh=false){return comtradeAvailability(this.cache,params,this.env.COMTRADE_KEY,fresh);}

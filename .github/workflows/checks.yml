@@ -13,7 +13,7 @@ jobs:
       - run: bun test
   container:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -33,7 +33,7 @@ jobs:
           ECONSTATS_CHECK_TOKEN: ci-only-non-secret-token-for-offline-container-checks
           ECONSTATS_CHECK_URL: http://127.0.0.1:3000
         run: |
-          docker run -d --name econstats-check -p 127.0.0.1:3000:3000 -e MCP_AUTH_MODE=bearer -e MCP_AUTH_TOKEN econstats-hosted
+          docker run -d --memory=256m --cpus=0.1 --name econstats-check -p 127.0.0.1:3000:3000 -e MCP_AUTH_MODE=bearer -e MCP_AUTH_TOKEN econstats-hosted
           bun run check:hosted
           test "$(docker exec econstats-check id -u)" != "0"
           docker stop -t 15 econstats-check
