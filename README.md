@@ -569,7 +569,7 @@ The cache layer also deduplicates in-flight requests, so a burst of identical Op
 
 Startup prefetch is disabled by default because short-lived stdio clients can create unnecessary upstream traffic. Turn it on only when you are running a persistent shared MCP service.
 
-## Tools (27)
+## Tools (41)
 
 | Tool | Description |
 |------|-------------|
@@ -577,9 +577,9 @@ Startup prefetch is disabled by default because short-lived stdio clients can cr
 | `connection_health` | Inspect credentials, access status, budgets/cooldowns; optionally probe live endpoints |
 | `fred_search` | Search FRED series by keyword |
 | `fred_get_series` | Fetch FRED data with transformations (YoY%, change, etc.) |
-| `bls_get_series` | Fetch BLS data with pre-computed YoY% and monthly changes |
+| `bls_get_series` | Fetch native BLS levels, available calculations and flags |
 | `bls_series_lookup` | Find BLS series IDs by keyword |
-| `bea_get_data` | BEA national accounts (GDP components, state data) |
+| `bea_get_data` | BEA NIPA national accounts; regional/state API not exposed |
 | `imf_list_datasets` | Search the current IMF dataset catalogue |
 | `imf_get_structure` | Look up ordered dimensions and current codes |
 | `imf_get_data` | Fetch current IMF SDMX data with source attribution |
@@ -600,10 +600,27 @@ Startup prefetch is disabled by default because short-lived stdio clients can cr
 | `ecb_get_data` | ECB data (euro area rates, HICP, money supply) |
 | `inflation_adjust` | Convert dollar amounts between dates using CPI-U |
 | `check_release_calendar` | Check if today is a data release day |
+| `abs_list_datasets` | Search ABS datasets |
+| `abs_get_structure` | Inspect ABS dimensions, versions and codes |
+| `abs_get_data` | Fetch exact ABS observations with native units and flags |
+| `revision_history` | Inspect locally observed revisions and snapshots |
+| `comtrade_list_reference` | Discover native trade area, flow and unit codes |
+| `comtrade_search_products` | Search HS products and hierarchy |
+| `comtrade_get_availability` | Check reporter/period publication availability |
+| `comtrade_get_data` | Retrieve bounded merchandise trade with completeness caveats |
+| `portwatch_list_locations` | Search ports and maritime chokepoints |
+| `portwatch_get_metadata` | Inspect shipping fields, units and edit dates |
+| `portwatch_get_data` | Retrieve daily AIS-derived shipping estimates |
+| `faostat_list_domains` | Inspect installed public snapshots and their dates |
+| `faostat_list_codes` | Discover native agricultural area/item/element codes |
+| `faostat_get_data` | Query annual food, crop and fertiliser snapshots |
 
 ## Data Sources
 
-All data comes from public official statistical APIs. We attribute data to its source agency (Federal Reserve, BLS, BEA, IMF, OECD, Eurostat, BIS, EIA, World Bank, ECB). Queries fetch from the source or reuse a cached source response.
+Data comes from official statistical APIs and public data releases. Queries
+fetch from the provider, reuse a cached source response or query an explicitly
+dated FAOSTAT snapshot. Results retain provider attribution, units and source
+URLs. The server's MIT licence does not replace the providers' data-use terms.
 
 ## License
 
