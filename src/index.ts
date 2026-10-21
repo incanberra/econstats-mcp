@@ -21,6 +21,7 @@ import {AccessError,PROVIDERS} from "./core/access";
 import {COMTRADE_CLASSIFICATIONS} from './core/comtrade';
 import {OECD_SPACES,buildOecdDataUrl} from './core/oecd';
 import {PORTWATCH_DATASETS} from './core/portwatch';
+import {version} from '../package.json';
 
 function txt(text: string) { return { content: [{ type: "text" as const, text }],...(/^(?:FRED|BLS|BEA|WORLD_BANK|ECB|IMF|OECD|Eurostat|BIS|EIA) error:/.test(text)?{isError:true}:{}) }; }
 function imfTxt(text: string) { return { ...txt(text), ...(text.startsWith("IMF error:") ? { isError: true } : {}) }; }
@@ -49,7 +50,7 @@ async function jsonResult(work:()=>Promise<any>){
 function createMcpServer() {
 const server = new McpServer({
   name: "econstats",
-  version: "3.2.0",
+  version,
 }, {
   instructions: `You are an expert economic analyst. Plain English in, cited analysis out.
 
@@ -486,7 +487,7 @@ if (PORT > 0) {
   const httpServer = createHttpServer(createMcpServer, config);
   installShutdownHandlers(httpServer);
   httpServer.listen(PORT, config.host, () => {
-    console.error(`EconStats MCP v3 running on port ${PORT}/mcp (Streamable HTTP; ${config.auth.mode})`);
+    console.error(`EconStats MCP ${version} running on port ${PORT}/mcp (Streamable HTTP; ${config.auth.mode})`);
     if (process.env.PREFETCH_HOT_SERIES === "true") {
       client.prefetchReleaseDaySeries();
     }

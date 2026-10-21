@@ -7,7 +7,7 @@ test('SDK delivers methodology instructions and exposes valid public data schema
   const transport=new StdioClientTransport({command:process.execPath,args:['run',resolve(import.meta.dir,'../src/index.ts')],env:{MCP_PORT:'0',PORT:'0',PREFETCH_HOT_SERIES:'false',ECONSTATS_DISK_CACHE:'false'},stderr:'pipe'});
   const c=new Client({name:'schema-regression',version:'1.0'});
   try{
-    await c.connect(transport);expect(c.getServerVersion()?.version).toBe('3.2.0');expect(c.getInstructions()).toContain('SOURCE ROUTING');
+    await c.connect(transport);expect(c.getServerVersion()?.version).toBe('3.2.1');expect(c.getInstructions()).toContain('SOURCE ROUTING');
     expect(c.getInstructions()).not.toContain('Quarterly figures are annualized');
     expect(c.getInstructions()).not.toContain('BLS data values are index levels');
     expect(c.getInstructions()).toContain('quarterly growth is not universally annualized');

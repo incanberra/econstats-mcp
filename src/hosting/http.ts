@@ -1,10 +1,14 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { randomUUID } from "node:crypto";
+import {version} from '../../package.json';
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { AuthFailure, authConfig, challenge, createVerifier, resourceMetadata, type AuthConfig } from "./auth";
 
 export type HttpConfig = { host: string; auth: AuthConfig; origins: Set<string>; maxConcurrent: number };
 const MAX_BODY = 1024 * 1024;
+// Never log arbitrary params, tokens, exception messages or caller-supplied names.
+const DIAGNOSTIC_TOOLS = new Set(["connection_health", "oecd_list_datasets", "oecd_get_structure", "oecd_get_data"]);
 
 export function configuredPort(env: NodeJS.ProcessEnv): number {
   const raw = env.MCP_PORT || env.PORT || "0";
@@ -52,16 +56,27 @@ export function createHttpServer(factory: () => McpServer, config: HttpConfig, v
   let active = 0;
   let draining = false;
   const http = createServer(async (req, res) => {
+    const requestId = randomUUID();
+    res.setHeader("X-Request-ID", requestId);
+    res.setHeader("X-EconStats-Version", version);
     res.setHeader("Cache-Control", "no-store");
     res.setHeader("X-Content-Type-Options", "nosniff");
     const pathname = (req.url ?? "/").split("?", 1)[0];
     let diagnostic = "response";
     let operation = "request";
+    let tool = "other";
     if (pathname === "/mcp") {
       const started = Date.now();
-      res.once("finish", () => {
-        console.error(`[http] MCP ${operation} status=${res.statusCode} reason=${diagnostic} duration_ms=${Date.now() - started}`);
-      });
+      let logged = false;
+      const log = () => {
+        if (logged) return;
+        logged = true;
+        const closed = !res.writableFinished;
+        const timedOut = diagnostic === "request_deadline";
+        console.error(`[http] MCP ${operation} tool=${tool} status=${timedOut ? 504 : closed ? 499 : res.statusCode} reason=${timedOut ? diagnostic : closed ? "client_closed" : diagnostic} request_id=${requestId} version=${version} duration_ms=${Date.now() - started}`);
+      };
+      res.once("finish", log);
+      res.once("close", log);
     }
     if (pathname === "/health" && ["GET", "HEAD"].includes(req.method ?? "")) {
       res.writeHead(draining ? 503 : 200, { "Content-Type": "text/plain" });
@@ -99,6 +114,7 @@ export function createHttpServer(factory: () => McpServer, config: HttpConfig, v
       void mcp?.close().catch(() => {});
     };
     const deadline = setTimeout(() => {
+      diagnostic = "request_deadline";
       if (!res.headersSent) reply(res, 504, "Request timed out");
       else res.destroy();
     }, 90000);
@@ -112,6 +128,8 @@ export function createHttpServer(factory: () => McpServer, config: HttpConfig, v
       const parsed = await body(req);
       const method = (parsed as { method?: unknown } | null)?.method;
       if (typeof method === "string" && ["initialize", "notifications/initialized", "tools/list", "tools/call", "ping"].includes(method)) operation = method;
+      const name = (parsed as {params?: {name?: unknown}} | null)?.params?.name;
+      if (method === "tools/call" && typeof name === "string" && DIAGNOSTIC_TOOLS.has(name)) tool = name;
       if (res.destroyed || res.writableEnded) return;
       // A fresh transport AND server per request avoid reused-transport initialization
       // failures and cross-client response mixups. Data caches/budgets remain shared.
@@ -126,7 +144,7 @@ export function createHttpServer(factory: () => McpServer, config: HttpConfig, v
         res.setHeader("WWW-Authenticate", challenge(config.auth, error.status));
         reply(res, error.status, error.status === 403 ? "Access denied" : "Authentication required");
       } else if (error === 413 || error === 400) reply(res, error, error === 413 ? "Request too large" : "Invalid JSON");
-      else { console.error("[http] MCP request failed."); reply(res, 500, "MCP request failed"); }
+      else { diagnostic = "request_failed"; reply(res, 500, "MCP request failed"); }
     } finally {
       if (res.writableEnded || res.destroyed) finish();
     }

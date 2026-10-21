@@ -36,7 +36,15 @@ beforeAll(async () => {
 
 afterAll(async () => {
   child?.kill();
-  if (child) { await child.exited; expect(await stderr).not.toContain(token); }
+  if (child) {
+    await child.exited;
+    const logs = await stderr;
+    expect(logs).not.toContain(token);
+    expect(logs).not.toContain("private_tool_name");
+    expect(logs).toContain("tool=connection_health");
+    expect(logs).toContain("request_id=");
+    expect(logs).toContain("version=3.2.1");
+  }
 });
 
 const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json", Accept: "application/json, text/event-stream" };
@@ -57,7 +65,10 @@ test("hosted configuration fails closed; development stdio remains available", (
 });
 
 test("public health works but missing/wrong credentials cannot discover or call tools", async () => {
-  expect(await (await fetch(`${base}/health`)).text()).toBe("ok");
+  const health = await fetch(`${base}/health`);
+  expect(await health.text()).toBe("ok");
+  expect(health.headers.get("x-econstats-version")).toBe("3.2.1");
+  expect(health.headers.get("x-request-id")).toMatch(/^[a-f0-9-]{36}$/);
   for (const path of ["/mcp", "/mcp?token=ignored"]) {
     const response = await fetch(`${base}${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
     expect(response.status).toBe(401);
@@ -80,6 +91,8 @@ test("routing, browser origins, preflight, JSON and body limits are enforced", a
   expect((await fetch(`${base}/mcp`, { method: "POST", headers, body: "broken" })).status).toBe(400);
   expect((await fetch(`${base}/mcp`, { method: "POST", headers: { ...headers, "Content-Type": "text/plain" }, body: "{}" })).status).toBe(415);
   expect((await fetch(`${base}/mcp`, { method: "POST", headers, body: JSON.stringify({ data: "x".repeat(1024 * 1024) }) })).status).toBe(413);
+  const invalidTool = await fetch(`${base}/mcp`, { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "private_tool_name", arguments: {} } }) });
+  await invalidTool.text();
 });
 
 test("multiple real SDK clients can initialize, discover and call tools concurrently", async () => {
