@@ -3,7 +3,7 @@ import {checkedJson,legacyFailure,worldBankPages,worldBankUrl,formatWorldBank,ec
 import {AccessError,accessGovernor,type Provider} from "./access";
 import {connectionHealth} from "./health";
 import { buildImfDataUrl, fetchImfData, fetchImfDatasets, fetchImfStructure, type ImfDataParams } from "./imf";
-import { buildOecdCatalogUrl, buildOecdDataUrl, buildOecdStructureUrl, formatOecdCsv, formatOecdDatasets, formatOecdStructure, requestOecd, type OecdDataParams, type OecdSpace } from "./oecd";
+import { buildOecdCatalogUrl, buildOecdDataUrl, buildOecdStructureUrl, formatOecdCsv, parseOecdCatalogue, formatOecdCatalogue, formatOecdStructure, requestOecd, type OecdDataParams, type OecdSpace } from "./oecd";
 import { EUROSTAT_CATALOG_URL, buildEurostatDataUrl, buildEurostatStructureUrl, formatEurostatDatasets, formatEurostatStructure, formatEurostatJson, validateEurostatFilters, requestEurostat, type EurostatDataParams } from "./eurostat";
 import { BIS_CATALOG_URL, buildBisDataUrl, buildBisStructureUrl, formatBisDatasets, formatBisStructure, getBisDefinition, validateBisKey, formatBisCsv, requestBis, type BisDataParams } from "./bis";
 import {selectionEvidence,eiaObservationResponse} from "./selection-data";
@@ -413,14 +413,12 @@ export class EconStatsCoreClient {
 
   async oecdListDatasets(query?: string, offset = 0, limit = 20, space?: OecdSpace): Promise<string> {
     try {
-      // Cache the catalogue once; different searches share the same upstream download.
+      // Share both the download and parsing across concurrent searches. Caching
+      // raw XML caused every search to reparse the full catalogue on the HTTP loop.
       const url = buildOecdCatalogUrl(space);
-      const xml = await this.cache.getOrCompute(`oecd:catalog:v2:${url}`, TTL.oecdMetadata, async () => {
-        const text = await requestOecd(url, true);
-        formatOecdDatasets(text, "", 0, 20, space); // Reject malformed responses before caching.
-        return text;
-      });
-      return formatOecdDatasets(xml, query, offset, limit, space);
+      const catalogue = await this.cache.getOrCompute(`oecd:catalog-index:v3:${url}`, TTL.oecdMetadata,
+        async () => parseOecdCatalogue(await requestOecd(url, true)));
+      return formatOecdCatalogue(catalogue, query, offset, limit, space);
     } catch (error) {
       return `OECD error: ${error instanceof Error ? error.message : "Request failed"}`;
     }

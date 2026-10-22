@@ -1,6 +1,6 @@
 import { parse } from "csv-parse/sync";
-import {providerFetch} from "./access";
-import { XMLParser } from "fast-xml-parser";
+import {providerFetch, AccessError, accessGovernor} from "./access";
+import { XMLParser, XMLValidator } from "fast-xml-parser";
 
 export const OECD_SPACES = ["public", "sti-public"] as const;
 export type OecdSpace = typeof OECD_SPACES[number];
@@ -12,7 +12,8 @@ export function resolveOecdSpace(datasetId?: string, space?: OecdSpace): OecdSpa
 }
 function baseUrl(space: OecdSpace): string { return `https://sdmx.oecd.org/${space}/rest`; }
 export function buildOecdCatalogUrl(space?: OecdSpace): URL {
-  return new URL(`${baseUrl(resolveOecdSpace(undefined, space))}/dataflow/all/all/latest?references=none`);
+  // Discovery only needs identifiers and names, not full annotations/descriptions.
+  return new URL(`${baseUrl(resolveOecdSpace(undefined, space))}/dataflow/all/all/latest?references=none&detail=allstubs`);
 }
 export const OECD_CATALOG_URL = String(buildOecdCatalogUrl());
 export interface OecdDataParams {
@@ -84,24 +85,45 @@ function structures(xml: string): any {
   return result;
 }
 
-export function formatOecdDatasets(xml: string, query = "", offset = 0, limit = 20, space?: OecdSpace): string {
+export type OecdDataset = { agency: string; id: string; version: string; name: string };
+
+export function parseOecdCatalogue(xml: string): OecdDataset[] {
+  if (/<!DOCTYPE|<!ENTITY/i.test(xml)) throw new Error("Unexpected XML document type in OECD response.");
+  if (XMLValidator.validate(xml) !== true) throw new Error("Unexpected OECD catalogue response: incomplete or invalid XML.");
+  const dataflows = structures(xml).Dataflows;
+  if (!dataflows) throw new Error("Unexpected OECD catalogue response: dataflows are missing.");
+  return list(dataflows.Dataflow).map(flow => {
+    const name = english(flow);
+    if (![flow.agencyID, flow.id, flow.version, name].every(value => typeof value === "string" && value.length > 0)) {
+      throw new Error("OECD catalogue contains an incomplete dataset definition.");
+    }
+    return { agency: flow.agencyID, id: flow.id, version: flow.version, name };
+  });
+}
+
+export function formatOecdCatalogue(catalogue: OecdDataset[], query = "", offset = 0, limit = 20, space?: OecdSpace): string {
   const catalogUrl = buildOecdCatalogUrl(space);
   if (!Number.isInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 50) throw new Error("Invalid catalogue pagination: offset >= 0, limit 1–50.");
   const synonyms: Record<string,string[]> = { inflation:["inflation","consumer price","cpi","hicp"], gdp:["gdp","gross domestic product","national accounts"] };
   const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
-  const flows = list(structures(xml).Dataflows?.Dataflow).filter(f => terms.every(t => {
-    const text = `${f.agencyID},${f.id} ${english(f)}`.toLowerCase();
+  const flows = catalogue.filter(f => terms.every(t => {
+    const text = `${f.agency},${f.id} ${f.name}`.toLowerCase();
     return (synonyms[t] ?? [t]).some(word => text.includes(word));
   })).sort((a,b) => {
     const relevance = (f: any) => {
-      const title = english(f).toLowerCase();
+      const title = f.name.toLowerCase();
       return (terms.includes("inflation") && /consumer price|hicp|inflation rate/.test(title) ? 10 : 0) +
         (terms.includes("gdp") && /national accounts|gross domestic product/.test(title) ? 10 : 0);
     };
     return relevance(b)-relevance(a);
   });
-  const rows = flows.slice(offset, offset+limit).map(f => `${f.agencyID},${f.id} (version ${f.version}): ${english(f)} [space=${resolveOecdSpace(`${f.agencyID},${f.id}`, space)}]`);
+  const rows = flows.slice(offset, offset+limit).map(f => `${f.agency},${f.id} (version ${f.version}): ${f.name} [space=${resolveOecdSpace(`${f.agency},${f.id}`, space)}]`);
   return `${rows.join("\n") || "No matching OECD datasets on this page."}\nShowing ${rows.length} of ${flows.length} matches (offset ${offset}). Use offset to continue. Inspect oecd_get_structure before constructing a series_key. TiVA requires explicit start_period and end_period.\nSource: ${catalogUrl}`;
+}
+
+// Compatibility entry point for callers that already have an XML response.
+export function formatOecdDatasets(xml: string, query = "", offset = 0, limit = 20, space?: OecdSpace): string {
+  return formatOecdCatalogue(parseOecdCatalogue(xml), query, offset, limit, space);
 }
 
 export function formatOecdStructure(xml: string, datasetId: string, version?: string, dimensionId?: string, query = "", space?: OecdSpace): string {
@@ -162,13 +184,44 @@ export function formatOecdCsv(csv: string, url: URL, limit = 36): string {
   return `${output || "No numeric OECD observations for this selection."}\n${missing ? `${missing} missing observations omitted; missing values are not zero.\n` : ""}\nSource: Organisation for Economic Co-operation and Development (OECD)\nURL: ${url}\nRetrieved: ${new Date().toISOString()}\nValues retain reported units and UNIT_MULT (power of ten), base periods, adjustment, transformation and observation-status flags. Cite the exact series, units, observation date and source URL. Do not infer definitions from the measure name alone.`;
 }
 
-export async function requestOecd(url: string | URL, metadata = false): Promise<string> {
-  const res = await providerFetch(url,{headers:{Accept:metadata ? "application/vnd.sdmx.structure+xml;version=2.1" : "text/csv"},signal:AbortSignal.timeout(30000)});
+function readChunk(reader: ReadableStreamDefaultReader<Uint8Array>, signal: AbortSignal) {
+  return new Promise<Awaited<ReturnType<typeof reader.read>>>((resolve, reject) => {
+    if (signal.aborted) { reject(signal.reason); return; }
+    const abort = () => reject(signal.reason);
+    signal.addEventListener("abort", abort, { once: true });
+    reader.read().then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+  });
+}
+
+export async function requestOecd(url: string | URL, metadata = false, timeoutMs = 30000): Promise<string> {
+  const signal = AbortSignal.timeout(timeoutMs);
+  const res = await providerFetch(url,{headers:{Accept:metadata ? "application/vnd.sdmx.structure+xml;version=2.1" : "text/csv"},signal});
   if (res.status === 429) throw new Error(`OECD rate limit reached (60 downloads/hour). Retry later${res.headers.get("Retry-After") ? `; Retry-After: ${res.headers.get("Retry-After")}` : ""}.`);
   if (res.status === 413) throw new Error("OECD rejected the query size or lastNObservations parameter. Specify start_period and end_period and narrow the series_key.");
   if (res.status === 404) throw new Error("OECD dataset/selection not found. Recheck discovery, version and series dimensions.");
   if (!res.ok) throw new Error(`OECD API HTTP ${res.status}. No data returned.`);
-  const text = await res.text();
-  if (text.length > 20_000_000) throw new Error("OECD response exceeds 20 MB. Narrow the selection and period range.");
-  return text;
+  const reader = res.body?.getReader();
+  const maxBytes = 20_000_000;
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    if (Number(res.headers.get("content-length")) > maxBytes) {
+      throw new AccessError("OECD", "invalid_response", "Response exceeds 20 MB. Narrow the selection and period range.");
+    }
+    if (!reader) throw new AccessError("OECD", "invalid_response", "Empty response body.");
+    while (true) {
+      const { done, value } = await readChunk(reader, signal);
+      if (done) break;
+      size += value.byteLength;
+      if (size > maxBytes) throw new AccessError("OECD", "invalid_response", "Response exceeds 20 MB. Narrow the selection and period range.");
+      chunks.push(value);
+    }
+    return Buffer.concat(chunks, size).toString("utf8");
+  } catch (error) {
+    // Cancellation must not itself prolong a timed-out tool call.
+    void reader?.cancel().catch(() => {});
+    const failure = error instanceof AccessError ? error : new AccessError("OECD", "unavailable", "Response body failed or timed out; no data returned.");
+    await accessGovernor().record("OECD", failure.kind).catch(() => {});
+    throw failure;
+  }
 }

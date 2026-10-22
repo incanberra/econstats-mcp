@@ -197,7 +197,33 @@ After deployment:
 HTTP errors and logs omit request headers, token values, provider credentials and
 raw exception details. `/health` is deliberately public and returns no secrets.
 Liveness is intentionally separate from external-provider availability so an
-upstream outage does not cause container restart loops.
+upstream outage does not cause container restart loops. Responses include
+`X-EconStats-Version` and a server-generated `X-Request-ID`. MCP logs retain that
+ID, version, method, selected diagnostic tool names, duration and completion,
+deadline or disconnected-client status; arguments and raw exception messages
+are not logged. The public health body remains `ok`.
+
+### OECD catalogue reliability (3.2.1)
+
+Catalogue discovery requests SDMX `detail=allstubs`, which retains dataset IDs,
+agencies, versions and names while omitting full descriptions and annotations.
+It validates and parses the response once and shares a compact catalogue across
+concurrent searches and subsequent cache hits. Full structure discovery is
+unchanged. OECD response bodies are capped at 20 MB while streaming, with a
+30-second deadline covering headers and body reads. Failed or incomplete
+catalogues are not cached.
+
+On 22 October 2026 the public catalogue contained 1,550 entries. Full and stub
+responses had identical identifiers and English names. The response decreased
+from 8,936,573 to 739,343 bytes; the compact cached index was 208,549 bytes. A
+local Bun 1.3.10 reproduction of cold validation plus two old searches peaked at
+283.5 MiB RSS; the compact path, including XML well-formedness validation, peaked
+at 118.4 MiB. These are local measurements, not container telemetry.
+The old footprint exceeded the 256 MiB limit used in the production-image CI
+check, making catalogue memory pressure a plausible cause of hosted failures.
+Hosting logs are still needed to confirm whether a particular incident was an
+out-of-memory restart. The existing per-request server/transport handling in
+this deployment branch was already correct and is retained.
 
 ## Local development
 
