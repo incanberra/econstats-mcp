@@ -1,11 +1,12 @@
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import {EventEmitter} from "node:events";
 import { randomUUID } from "node:crypto";
 import {version} from '../../package.json';
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import {WebStandardStreamableHTTPServerTransport} from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { AuthFailure, authConfig, challenge, createVerifier, resourceMetadata, type AuthConfig } from "./auth";
+import {abortable,cancellation,withRequestContext,checkCancelled,phase} from '../core/request-context';
 
-export type HttpConfig = { host: string; auth: AuthConfig; origins: Set<string>; maxConcurrent: number };
+export type HttpConfig = { host: string; auth: AuthConfig; origins: Set<string>; maxConcurrent: number;requestTimeoutMs?:number };
 const MAX_BODY = 1024 * 1024;
 // Never log arbitrary params, tokens, exception messages or caller-supplied names.
 const DIAGNOSTIC_TOOLS = new Set(["connection_health", "oecd_list_datasets", "oecd_get_structure", "oecd_get_data"]);
@@ -29,147 +30,130 @@ export function httpConfig(env: NodeJS.ProcessEnv): HttpConfig {
     origins.add(origin);
   }
   if (auth.mode === "oauth") origins.add(new URL(auth.publicUrl).origin);
-  const maxConcurrent = Number(env.MCP_MAX_CONCURRENT || "16");
+  const maxConcurrent = Number(env.MCP_MAX_CONCURRENT || "4");
   if (!Number.isInteger(maxConcurrent) || maxConcurrent < 1 || maxConcurrent > 128) throw new Error("MCP_MAX_CONCURRENT must be an integer from 1 to 128.");
-  return { host, auth, origins, maxConcurrent };
+  const requestTimeoutMs=Number(env.MCP_REQUEST_TIMEOUT_MS||'55000');
+  if(!Number.isInteger(requestTimeoutMs)||requestTimeoutMs<1000||requestTimeoutMs>90000)throw new Error('MCP_REQUEST_TIMEOUT_MS must be an integer from 1000 to 90000.');
+  return { host, auth, origins, maxConcurrent,requestTimeoutMs };
 }
 
-function reply(res: ServerResponse, status: number, message: string) {
-  res.writeHead(status, { "Content-Type": "application/json" });
-  res.end(JSON.stringify({ error: message }));
-}
-
-async function body(req: IncomingMessage): Promise<unknown> {
-  if (Number(req.headers["content-length"]) > MAX_BODY) throw 413;
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of req) {
-    const bytes = Buffer.from(chunk);
-    size += bytes.length;
-    if (size > MAX_BODY) throw 413;
-    chunks.push(bytes);
+// Bun's native Request.signal reliably reports disconnects; the Node HTTP adapter
+// does not do so for an abandoned response in the pinned runtime.
+export class HostedServer extends EventEmitter {
+  private server?:Bun.Server<undefined>;
+  private closing=false;
+  constructor(private handler:(request:Request,server:Bun.Server<undefined>)=>Promise<Response>,private drain:()=>void){super();}
+  listen(port:number,host:string,callback:()=>void){
+    try{
+      this.server=Bun.serve({port,hostname:host,idleTimeout:10,maxRequestBodySize:MAX_BODY*2,
+        fetch:(request,server)=>this.handler(request,server)});
+      queueMicrotask(callback);
+    }catch(error){queueMicrotask(()=>this.emit('error',error));}
+    return this;
   }
-  try { return JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { throw 400; }
+  address(){return this.server?{address:this.server.hostname,port:this.server.port,family:'IPv4'}:null;}
+  econstatsDrain(){this.drain();}
+  close(callback?:(error?:Error)=>void){
+    this.drain();this.server?.stop(false);
+    if(this.closing){callback?.();return this;}this.closing=true;
+    const wait=()=>{
+      if(!this.server?.pendingRequests){this.emit('close');callback?.();}
+      else setTimeout(wait,10).unref();
+    };wait();return this;
+  }
+  closeAllConnections(){this.server?.stop(true);}
+  closeIdleConnections(){/* stop(false) already closes idle connections. */}
 }
 
-export function createHttpServer(factory: () => McpServer, config: HttpConfig, verify = createVerifier(config.auth)): Server {
-  let active = 0;
-  let draining = false;
-  const http = createServer(async (req, res) => {
-    const requestId = randomUUID();
-    res.setHeader("X-Request-ID", requestId);
-    res.setHeader("X-EconStats-Version", version);
-    res.setHeader("Cache-Control", "no-store");
-    res.setHeader("X-Content-Type-Options", "nosniff");
-    const pathname = (req.url ?? "/").split("?", 1)[0];
-    let diagnostic = "response";
-    let operation = "request";
-    let tool = "other";
-    if (pathname === "/mcp") {
-      const started = Date.now();
-      let logged = false;
-      const log = () => {
-        if (logged) return;
-        logged = true;
-        const closed = !res.writableFinished;
-        const timedOut = diagnostic === "request_deadline";
-        console.error(`[http] MCP ${operation} tool=${tool} status=${timedOut ? 504 : closed ? 499 : res.statusCode} reason=${timedOut ? diagnostic : closed ? "client_closed" : diagnostic} request_id=${requestId} version=${version} duration_ms=${Date.now() - started}`);
-      };
-      res.once("finish", log);
-      res.once("close", log);
-    }
-    if (pathname === "/health" && ["GET", "HEAD"].includes(req.method ?? "")) {
-      res.writeHead(draining ? 503 : 200, { "Content-Type": "text/plain" });
-      res.end(draining ? "draining" : "ok"); return;
-    }
-    const origin = req.headers.origin;
-    if (origin && !config.origins.has(origin)) { diagnostic = "origin_not_allowed"; reply(res, 403, "Origin not allowed"); return; }
-    if (origin) {
-      res.setHeader("Access-Control-Allow-Origin", origin);
-      res.setHeader("Vary", "Origin");
-      res.setHeader("Access-Control-Expose-Headers", "WWW-Authenticate, MCP-Protocol-Version");
-    }
-    if (config.auth.mode === "oauth" && ["/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp"].includes(pathname)) {
-      if (req.method !== "GET") { res.setHeader("Allow", "GET"); reply(res, 405, "Method not allowed"); return; }
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(resourceMetadata(config.auth))); return;
-    }
-    if (pathname !== "/mcp") { reply(res, 404, "Not found; use /mcp"); return; }
-    if (req.method === "OPTIONS") {
-      res.writeHead(204, {
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Authorization, Content-Type, Accept, MCP-Protocol-Version, Mcp-Session-Id, Last-Event-ID",
-        "Access-Control-Max-Age": "600",
-      }); res.end(); return;
-    }
-    if (draining) { reply(res, 503, "Server is restarting"); return; }
-    if (active >= config.maxConcurrent) { res.setHeader("Retry-After", "1"); reply(res, 429, "Server is busy; retry later"); return; }
-    // Count token verification and slow request bodies as well as MCP execution.
-    active++;
-    let released = false;
-    let mcp: McpServer | undefined;
-    const finish = () => {
-      if (released) return;
-      released = true; active--; clearTimeout(deadline);
-      void mcp?.close().catch(() => {});
+async function body(request:Request):Promise<unknown>{
+  if(Number(request.headers.get('content-length'))>MAX_BODY)throw 413;
+  const reader=request.body?.getReader();if(!reader)throw 400;
+  const chunks:Uint8Array[]=[];let size=0;
+  try{
+    while(true){const r=await abortable(reader.read());if(r.done)break;size+=r.value.byteLength;
+      if(size>MAX_BODY)throw 413;chunks.push(r.value);}
+    try{return JSON.parse(Buffer.concat(chunks,size).toString('utf8'));}catch{throw 400;}
+  }catch(error){void reader.cancel().catch(()=>{});throw error;}
+  finally{reader.releaseLock();}
+}
+
+export function createHttpServer(factory:()=>McpServer,config:HttpConfig,verify=createVerifier(config.auth)):HostedServer{
+  let active=0,draining=false;
+  return new HostedServer(async(request,bunServer)=>{
+    const requestId=randomUUID(),pathname=new URL(request.url).pathname,started=performance.now();
+    const headers=new Headers({'X-Request-ID':requestId,'X-EconStats-Version':version,'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});
+    let status=500,reason='response_ready',operation='request',tool='other',maxLag=0;
+    let admitted=false,mcp:McpServer|undefined,timer:ReturnType<typeof setTimeout>|undefined,heartbeat:ReturnType<typeof setInterval>|undefined;
+    const controller=new AbortController();
+    const disconnected=()=>{reason='client_closed';controller.abort(cancellation('client_closed'));};
+    const respond=(code:number,message:string,text=false)=>{
+      status=code;headers.set('Content-Type',text?'text/plain':'application/json');
+      return new Response(text?message:JSON.stringify({error:message}),{status:code,headers});
     };
-    const deadline = setTimeout(() => {
-      diagnostic = "request_deadline";
-      if (!res.headersSent) reply(res, 504, "Request timed out");
-      else res.destroy();
-    }, 90000);
-    deadline.unref();
-    res.once("close", finish);
-    try {
-      await verify(req.headers.authorization);
-      if (res.destroyed || res.writableEnded) return;
-      if (req.method !== "POST") { res.setHeader("Allow", "POST, OPTIONS"); reply(res, 405, "Use POST for stateless MCP"); return; }
-      if (!/^application\/json(?:\s*;|$)/i.test(req.headers["content-type"] ?? "")) { reply(res, 415, "Use application/json"); return; }
-      const parsed = await body(req);
-      const method = (parsed as { method?: unknown } | null)?.method;
-      if (typeof method === "string" && ["initialize", "notifications/initialized", "tools/list", "tools/call", "ping"].includes(method)) operation = method;
-      const name = (parsed as {params?: {name?: unknown}} | null)?.params?.name;
-      if (method === "tools/call" && typeof name === "string" && DIAGNOSTIC_TOOLS.has(name)) tool = name;
-      if (res.destroyed || res.writableEnded) return;
-      // A fresh transport AND server per request avoid reused-transport initialization
-      // failures and cross-client response mixups. Data caches/budgets remain shared.
-      mcp = factory();
-      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
-      await mcp.connect(transport);
-      await transport.handleRequest(req, res, parsed);
-    } catch (error) {
-      if (res.headersSent || res.destroyed) return;
-      if (error instanceof AuthFailure) {
-        diagnostic = error.reason;
-        res.setHeader("WWW-Authenticate", challenge(config.auth, error.status));
-        reply(res, error.status, error.status === 403 ? "Access denied" : "Authentication required");
-      } else if (error === 413 || error === 400) reply(res, error, error === 413 ? "Request too large" : "Invalid JSON");
-      else { diagnostic = "request_failed"; reply(res, 500, "MCP request failed"); }
-    } finally {
-      if (res.writableEnded || res.destroyed) finish();
+    try{
+      if(pathname==='/health'&&['GET','HEAD'].includes(request.method))return respond(draining?503:200,draining?'draining':'ok',true);
+      const origin=request.headers.get('origin');
+      if(origin&&!config.origins.has(origin)){reason='origin_not_allowed';return respond(403,'Origin not allowed');}
+      if(origin){headers.set('Access-Control-Allow-Origin',origin);headers.set('Vary','Origin');
+        headers.set('Access-Control-Expose-Headers','WWW-Authenticate, MCP-Protocol-Version, X-Request-ID, X-EconStats-Version');}
+      if(config.auth.mode==='oauth'&&['/.well-known/oauth-protected-resource','/.well-known/oauth-protected-resource/mcp'].includes(pathname)){
+        if(request.method!=='GET'){headers.set('Allow','GET');return respond(405,'Method not allowed');}
+        status=200;headers.set('Content-Type','application/json');return new Response(JSON.stringify(resourceMetadata(config.auth)),{headers});
+      }
+      if(pathname!=='/mcp')return respond(404,'Not found; use /mcp');
+      if(request.method==='OPTIONS'){
+        status=204;headers.set('Access-Control-Allow-Methods','POST, OPTIONS');
+        headers.set('Access-Control-Allow-Headers','Authorization, Content-Type, Accept, MCP-Protocol-Version, Mcp-Session-Id, Last-Event-ID');
+        headers.set('Access-Control-Max-Age','600');return new Response(null,{status,headers});
+      }
+      if(draining)return respond(503,'Server is restarting');
+      if(active>=config.maxConcurrent){headers.set('Retry-After','1');return respond(429,'Server is busy; retry later');}
+      active++;admitted=true;
+      const timeout=config.requestTimeoutMs??55000;
+      // A silent data query must reach our explicit deadline before Bun's idle timer.
+      bunServer.timeout(request,Math.ceil(timeout/1000)+5);
+      if(request.signal.aborted)disconnected();else request.signal.addEventListener('abort',disconnected,{once:true});
+      timer=setTimeout(()=>{reason='request_deadline';controller.abort(cancellation('deadline'));},timeout);timer.unref();
+      let lastTick=performance.now();
+      heartbeat=setInterval(()=>{const now=performance.now();maxLag=Math.max(maxLag,now-lastTick-100);lastTick=now;},100);heartbeat.unref();
+      return await withRequestContext({signal:controller.signal,requestId},async()=>{
+        await phase('auth.verify',()=>verify(request.headers.get('authorization')??undefined));checkCancelled();
+        if(request.method!=='POST'){headers.set('Allow','POST, OPTIONS');return respond(405,'Use POST for stateless MCP');}
+        if(!/^application\/json(?:\s*;|$)/i.test(request.headers.get('content-type')??''))return respond(415,'Use application/json');
+        const parsed=await phase('request.body',()=>body(request)),method=(parsed as {method?:unknown}|null)?.method;
+        if(typeof method==='string'&&['initialize','notifications/initialized','tools/list','tools/call','ping'].includes(method))operation=method;
+        const name=(parsed as {params?:{name?:unknown}}|null)?.params?.name;
+        if(method==='tools/call'&&typeof name==='string'&&DIAGNOSTIC_TOOLS.has(name))tool=name;
+        checkCancelled();mcp=factory();
+        const transport=new WebStandardStreamableHTTPServerTransport({sessionIdGenerator:undefined,enableJsonResponse:true});
+        await mcp.connect(transport);
+        const response=await phase('transport.handle',()=>transport.handleRequest(request,{parsedBody:parsed}));checkCancelled();
+        status=response.status;
+        const combined=new Headers(response.headers);for(const [key,value] of headers)combined.set(key,value);
+        return new Response(response.body,{status:response.status,statusText:response.statusText,headers:combined});
+      });
+    }catch(error){
+      if(controller.signal.aborted)return respond(reason==='request_deadline'?504:499,reason==='request_deadline'?'Request timed out':'Request cancelled');
+      if(error instanceof AuthFailure){reason=error.reason;headers.set('WWW-Authenticate',challenge(config.auth,error.status));return respond(error.status,error.status===403?'Access denied':'Authentication required');}
+      if(error===413||error===400)return respond(error,error===413?'Request too large':'Invalid JSON');
+      reason='request_failed';return respond(500,'MCP request failed');
+    }finally{
+      clearTimeout(timer);clearInterval(heartbeat);request.signal.removeEventListener('abort',disconnected);
+      if(admitted){active--;controller.abort(cancellation('client_closed'));void mcp?.close().catch(()=>{});}
+      if(pathname==='/mcp'){
+        const memory=process.memoryUsage();
+        console.error(`[http] MCP ${operation} tool=${tool} status=${status} reason=${reason} request_id=${requestId} version=${version} duration_ms=${Math.round(performance.now()-started)} event_loop_lag_ms=${Math.round(maxLag)} rss_bytes=${memory.rss} heap_used_bytes=${memory.heapUsed}`);
+      }
     }
-  });
-  http.requestTimeout = 30000;
-  http.headersTimeout = 10000;
-  http.keepAliveTimeout = 5000;
-  // Keep health checks useful during graceful shutdown.
-  http.on("close", () => { draining = true; });
-  Object.defineProperty(http, "econstatsDrain", { value: () => { draining = true; } });
-  return http;
+  },()=>{draining=true;});
 }
 
-export function installShutdownHandlers(http: Server) {
-  let stopping = false;
-  const stop = () => {
-    if (stopping) return;
-    stopping = true;
-    (http as Server & { econstatsDrain: () => void }).econstatsDrain();
-    console.error("[http] Draining requests before shutdown.");
-    const deadline = setTimeout(() => { http.closeAllConnections(); process.exit(0); }, 10000);
-    deadline.unref();
-    http.close(() => { clearTimeout(deadline); process.exit(0); });
-    http.closeIdleConnections();
+export function installShutdownHandlers(http:HostedServer){
+  let stopping=false;
+  const stop=()=>{
+    if(stopping)return;stopping=true;http.econstatsDrain();console.error('[http] Draining requests before shutdown.');
+    const deadline=setTimeout(()=>{http.closeAllConnections();process.exit(0);},10000);deadline.unref();
+    http.close(()=>{clearTimeout(deadline);process.exit(0);});http.closeIdleConnections();
   };
-  process.once("SIGTERM", stop);
-  process.once("SIGINT", stop);
+  process.once('SIGTERM',stop);process.once('SIGINT',stop);
 }

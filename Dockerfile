@@ -23,4 +23,4 @@ COPY --chown=bun:bun package.json ./
 COPY --chown=bun:bun src ./src
 USER bun
 EXPOSE 3000
-CMD ["bun", "run", "src/index.ts"]
+CMD ["bun", "--smol", "src/index.ts"]

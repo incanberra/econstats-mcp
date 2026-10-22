@@ -1,6 +1,6 @@
 {
   "name": "econstats-mcp",
-  "version": "3.2.1",
+  "version": "3.2.2",
   "description": "Economic data MCP server with PortWatch, FAOSTAT, structured observations and revision tracking",
   "type": "module",
   "bin": {

@@ -22,6 +22,7 @@ import {COMTRADE_CLASSIFICATIONS} from './core/comtrade';
 import {OECD_SPACES,buildOecdDataUrl} from './core/oecd';
 import {PORTWATCH_DATASETS} from './core/portwatch';
 import {version} from '../package.json';
+import {phase} from './core/request-context';
 
 function txt(text: string) { return { content: [{ type: "text" as const, text }],...(/^(?:FRED|BLS|BEA|WORLD_BANK|ECB|IMF|OECD|Eurostat|BIS|EIA) error:/.test(text)?{isError:true}:{}) }; }
 function imfTxt(text: string) { return { ...txt(text), ...(text.startsWith("IMF error:") ? { isError: true } : {}) }; }
@@ -38,7 +39,7 @@ async function data(tool:string,args:Record<string,any>){
   try{buildOecdDataUrl({datasetId:args.dataset_id,space:args.space,version:args.version,seriesKey:args.series_key,startPeriod:args.start_period,endPeriod:args.end_period,limit:args.limit});}
   catch(error){return {isError:true,content:[{type:'text' as const,text:error instanceof Error?`OECD error: ${error.message}`:'OECD error: Invalid query.'}]};}
  }
- try{const result=await client.getStructuredData({tool,arguments:parameters},fresh);return {content:[{type:"text" as const,text:renderResult(result)}],structuredContent:result as unknown as Record<string,unknown>};}
+ try{const result=await client.getStructuredData({tool,arguments:parameters},fresh);const text=await phase('result.render',()=>renderResult(result));return {content:[{type:"text" as const,text}],structuredContent:result as unknown as Record<string,unknown>};}
  catch(error){return {isError:true,content:[{type:"text" as const,text:error instanceof AccessError?error.message:"Data retrieval failed validation. Check dataset metadata, parameters, credentials and provider availability; no data were inferred."}]};}
 }
 async function jsonResult(work:()=>Promise<any>){

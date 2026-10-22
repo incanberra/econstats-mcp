@@ -1,6 +1,8 @@
 import { parse } from "csv-parse/sync";
 import {providerFetch, AccessError, accessGovernor} from "./access";
 import { XMLParser, XMLValidator } from "fast-xml-parser";
+import {checkCancelled,requestSignal} from './request-context';
+import type {SdmxDefinition} from './abs';
 
 export const OECD_SPACES = ["public", "sti-public"] as const;
 export type OecdSpace = typeof OECD_SPACES[number];
@@ -151,6 +153,17 @@ export function formatOecdStructure(xml: string, datasetId: string, version?: st
   return `Dataset ${datasetId} (version ${flow.version}): ${english(flow)}\nSpace: ${resolvedSpace}\nseries_key dimension order: ${dimensions.map(x=>x.id).join(".")}\nCodes in the structure are not a guarantee of available observations. Choose exact units, adjustment, methodology and transformation; do not equate national CPI, CPIH and HICP.${resolvedSpace === "sti-public" || d.id.startsWith("DSD_TIVA_") ? " TiVA requests require both start_period and end_period; latest-observation parameters are blocked by OECD." : ""}\n\n${details.join("\n\n")}\n\nSource: ${buildOecdStructureUrl(datasetId,version,space)}`;
 }
 
+/** Render only a compact validated definition; no XML parsing on a cache hit. */
+export function formatOecdDefinition(def:SdmxDefinition,datasetId:string,dimensionId?:string,query='',space?:OecdSpace):string{
+  if(dimensionId&&!def.dimensions.some(d=>d.id===dimensionId))throw new Error(`Unknown dimension ${dimensionId}. Available: ${def.dimensions.map(d=>d.id).join(', ')}`);
+  const terms=query.toLowerCase().split(/\s+/).filter(Boolean),resolved=resolveOecdSpace(datasetId,space);
+  const details=def.dimensions.filter(d=>!dimensionId||d.id===dimensionId).map(d=>{
+    const codes=d.codes.filter(c=>terms.every(t=>`${c.code} ${c.label}`.toLowerCase().includes(t))),count=dimensionId?60:5;
+    return `${d.id}: ${codes.slice(0,count).map(c=>`${c.code}=${c.label}`).join('; ')}\nShowing ${Math.min(count,codes.length)} of ${codes.length} codes.`;
+  });
+  return `Dataset ${datasetId} (version ${def.version}): ${def.label}\nSpace: ${resolved}\nseries_key dimension order: ${def.dimensions.map(d=>d.id).join('.')}\nCodes in the structure are not a guarantee of available observations. Choose exact units, adjustment, methodology and transformation; do not equate national CPI, CPIH and HICP.${resolved==='sti-public'?' TiVA requests require both start_period and end_period; latest-observation parameters are blocked by OECD.':''}\n\n${details.join('\n\n')}\n\nSource: ${buildOecdStructureUrl(datasetId,def.version,space)}`;
+}
+
 export function formatOecdCsv(csv: string, url: URL, limit = 36): string {
   const header = parse(csv, { bom:true, to:1 })[0] as string[] | undefined;
   if (!header?.includes("TIME_PERIOD") || !header.includes("OBS_VALUE")) throw new Error("Unexpected OECD response: SDMX-CSV observation columns are missing.");
@@ -194,7 +207,8 @@ function readChunk(reader: ReadableStreamDefaultReader<Uint8Array>, signal: Abor
 }
 
 export async function requestOecd(url: string | URL, metadata = false, timeoutMs = 30000): Promise<string> {
-  const signal = AbortSignal.timeout(timeoutMs);
+  const parent=requestSignal();
+  const signal = AbortSignal.any([AbortSignal.timeout(timeoutMs),...(parent?[parent]:[])]);
   const res = await providerFetch(url,{headers:{Accept:metadata ? "application/vnd.sdmx.structure+xml;version=2.1" : "text/csv"},signal});
   if (res.status === 429) throw new Error(`OECD rate limit reached (60 downloads/hour). Retry later${res.headers.get("Retry-After") ? `; Retry-After: ${res.headers.get("Retry-After")}` : ""}.`);
   if (res.status === 413) throw new Error("OECD rejected the query size or lastNObservations parameter. Specify start_period and end_period and narrow the series_key.");
@@ -216,10 +230,14 @@ export async function requestOecd(url: string | URL, metadata = false, timeoutMs
       if (size > maxBytes) throw new AccessError("OECD", "invalid_response", "Response exceeds 20 MB. Narrow the selection and period range.");
       chunks.push(value);
     }
+    const expected=res.headers.get('content-length'),encoding=res.headers.get('content-encoding');
+    if(expected!==null&&(!encoding||encoding==='identity')&&Number(expected)!==size)
+      throw new AccessError('OECD','invalid_response','Response length does not match its header; no data were returned.');
     return Buffer.concat(chunks, size).toString("utf8");
   } catch (error) {
     // Cancellation must not itself prolong a timed-out tool call.
     void reader?.cancel().catch(() => {});
+    checkCancelled();
     const failure = error instanceof AccessError ? error : new AccessError("OECD", "unavailable", "Response body failed or timed out; no data returned.");
     await accessGovernor().record("OECD", failure.kind).catch(() => {});
     throw failure;
