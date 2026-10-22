@@ -1,3 +1,4 @@
+import {rankCatalogue} from './catalogue-search';
 import { parse } from "csv-parse/sync";
 import { XMLParser } from "fast-xml-parser";
 import countries from "i18n-iso-countries";
@@ -134,10 +135,8 @@ function name(item: any): string {
 export function formatImfDatasets(xml: string, query = ""): string {
   const structures = xmlStructures(xml);
   const flows = list<any>(structures.Dataflows?.Dataflow);
-  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
   const topics: Record<string, string> = { CPI: "inflation", ER: "exchange rate currency", ANEA: "GDP national accounts output", QNEA: "GDP national accounts output", IMTS: "trade", BOP: "balance of payments", WEO: "economic outlook forecasts GDP inflation" };
-  const matches = flows.filter(f => terms.every(t => `${f.agencyID}:${f.id} ${name(f)} ${topics[String(f.id).split("_")[0]] ?? ""}`.toLowerCase().includes(t)))
-    .sort((a,b) => Number(String(a.id).includes("VINTAGE"))-Number(String(b.id).includes("VINTAGE")) || String(a.id).localeCompare(String(b.id)));
+  const matches = rankCatalogue(flows,query,f=>({id:`${f.agencyID}:${f.id}`,name:name(f),description:topics[String(f.id).split('_')[0]]}));
   if (!matches.length) return "No matching IMF datasets. Try inflation, exchange rate, GDP, trade, or balance of payments.";
   return matches.slice(0, 100).map(f => `${f.agencyID}:${f.id} (version ${f.version}): ${name(f)}`).join("\n") + `\nShowing ${Math.min(matches.length,100)} of ${matches.length} matches. Call imf_get_structure before constructing series_key.\nSource: ${BASE}/dataflow/all/all/latest?references=none`;
 }

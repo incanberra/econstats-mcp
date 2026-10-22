@@ -1,3 +1,4 @@
+import {rankCatalogue} from './catalogue-search';
 import { createLayeredCache, type LayeredCache } from "./cache";
 import {checkedJson,legacyFailure,worldBankPages,worldBankUrl,formatWorldBank,ecbUrl,formatEcb} from "./legacy";
 import {AccessError,accessGovernor,type Provider} from "./access";
@@ -104,8 +105,8 @@ export class EconStatsCoreClient {
   }
 
   async selectSource(params: SelectionParams): Promise<string> {
-    return JSON.stringify(await selectSource(params,{FRED:!!this.env.FRED_KEY,BEA:!!this.env.BEA_KEY,EIA:!!this.env.EIA_KEY},async r=>{
-      const e=await selectionEvidence(r,this.env,this.cache);
+    return JSON.stringify(await selectSource(params,{FRED:!!this.env.FRED_KEY,BEA:!!this.env.BEA_KEY,EIA:!!this.env.EIA_KEY,COMTRADE:!!this.env.COMTRADE_KEY},async r=>{
+      const e=await selectionEvidence(r,this.env,this.cache,{startPeriod:params.startPeriod,endPeriod:params.endPeriod});
       const s=dataSeries(`verified:${e.measure}`,{...e.dimensions,country:e.country},e.urls[0],{frequency:e.frequency,unit:e.unit,unitMultiplier:e.unitMultiplier,adjustment:e.adjustment,transformation:e.transformation,urls:e.urls,notes:e.notes,observations:e.observations.map(o=>({...o,attributes:o.attributes??{}}))});
       const tracked=await this.revisions.track(finishResult(e.source,{},[s],e.retrievedAt,120));
       return {...e,revision:tracked.series[0].revision};
@@ -402,7 +403,7 @@ export class EconStatsCoreClient {
 
   async imfListDatasets(query?: string): Promise<string> {
     try {
-      return await this.cache.getOrCompute(`imf:catalog:v1:${query ?? ""}`, TTL.imfData, () => fetchImfDatasets(query));
+      return await this.cache.getOrCompute(`imf:catalog:v2:${query ?? ""}`, TTL.imfData, () => fetchImfDatasets(query));
     } catch (error) {
       return `IMF error: ${error instanceof Error ? error.message : "Request failed"}`;
     }
@@ -585,10 +586,7 @@ export class EconStatsCoreClient {
     return this.legacyCall("WORLD_BANK",async()=>{
       const url=new URL("https://api.worldbank.org/v2/indicator?format=json&source=2&per_page=1000");
       const catalogue=await this.cache.getOrCompute("worldbank:catalog:v3",TTL.worldBankSearch,()=>worldBankPages(url));
-      const terms=query.toLowerCase().split(/\s+/).filter(Boolean);
-      const matches=catalogue.rows.filter((r:any)=>terms.every(t=>`${r.id} ${r.name} ${r.sourceNote??""}`.toLowerCase().includes(t)));
-      const score=(r:any)=>(String(r.name).toLowerCase().replace(/[^a-z0-9]+/g," ").trim()===terms.join(" ")?1000:0)+terms.reduce((s,t)=>s+(`${r.id} ${r.name}`.toLowerCase().includes(t)?10:0),0);
-      matches.sort((a:any,b:any)=>score(b)-score(a)||a.id.localeCompare(b.id));
+      const matches=rankCatalogue(catalogue.rows,query,(r:any)=>({id:r.id,name:r.name,description:r.sourceNote}));
       return `${matches.slice(0,30).map((r:any)=>`${r.id}: ${r.name}`).join("\n")||"No matching WDI indicators."}\nShowing ${Math.min(30,matches.length)} of ${matches.length} matches across the complete downloaded WDI catalogue (${catalogue.pages} pages).\nSource: ${url}\nCatalogue updated: ${catalogue.updated}`;
     });
   }
