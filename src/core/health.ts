@@ -2,6 +2,8 @@ import {PROVIDERS,accessGovernor,providerFetch,AccessError,type Provider} from "
 import {checkedJson} from "./legacy";
 import {requestEurostat} from "./eurostat";
 import {comtradeUrl,requestComtrade} from './comtrade';
+import {portwatchUrl,portwatchJson} from './portwatch';
+import {probeFaostat} from './faostat';
 type Keys={FRED_KEY?:string;BLS_KEY?:string;BEA_KEY?:string;EIA_KEY?:string;COMTRADE_KEY?:string};
 export async function connectionHealth(keys:Keys,sources:Provider[]= [...PROVIDERS],probe=false){
   if(!sources.length||sources.some(s=>!PROVIDERS.includes(s))||(probe&&sources.length>3))throw new Error("Choose valid providers; a live health check supports at most 3 sources per call.");
@@ -31,6 +33,10 @@ export async function connectionHealth(keys:Keys,sources:Provider[]= [...PROVIDE
           const params={reporter_code:36,frequency:'A' as const,classification:'HS' as const,access_mode:keys.COMTRADE_KEY?'authenticated' as const:'preview' as const,periods:['2023']};
           const b=await requestComtrade(comtradeUrl('availability',params,'2023'),keys.COMTRADE_KEY);if(!Array.isArray(b.data))throw new AccessError(provider,'invalid_response','Missing Comtrade availability metadata.');
           message=keys.COMTRADE_KEY?'Authenticated availability endpoint checked; product coverage is not tested.':'Public availability endpoint checked; authenticated data access is not tested.';
+        }else if(provider==='PORTWATCH'){
+          const url=portwatchUrl('chokepoints');url.search='f=json';const body=await portwatchJson(url);if(!Array.isArray(body.fields))throw new AccessError(provider,'invalid_response','Missing PortWatch metadata.');
+        }else if(provider==='FAOSTAT'){
+          message=await probeFaostat();
         }else{
           const urls:Partial<Record<Provider,string>>={
             IMF:"https://api.imf.org/external/sdmx/2.1/dataflow/IMF.STA/CPI/latest?references=none",

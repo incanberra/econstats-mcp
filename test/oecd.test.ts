@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import {resetAccessState} from "../src/core/access";
-import { buildOecdCatalogUrl, buildOecdDataUrl, buildOecdStructureUrl, formatOecdCsv, formatOecdDatasets, formatOecdStructure } from "../src/core/oecd";
+import {resetAccessState, accessGovernor} from "../src/core/access";
+import { buildOecdCatalogUrl, buildOecdDataUrl, buildOecdStructureUrl, formatOecdCsv, formatOecdDatasets, formatOecdStructure, parseOecdCatalogue, formatOecdCatalogue, requestOecd } from "../src/core/oecd";
 import { EconStatsCoreClient } from "../src/core/client";
 import {fetchStructured} from "../src/core/structured-data";
 import {LayeredCache,MemoryCacheBackend} from "../src/core/cache";
@@ -37,6 +37,8 @@ const tivaCsv = "DATAFLOW,REF_AREA,FREQ,UNIT_MEASURE,UNIT_MULT,TIME_PERIOD,OBS_V
 describe("TiVA service routing", () => {
   test("uses an allowlisted space consistently and preserves public defaults", () => {
     expect(buildOecdCatalogUrl().pathname).toStartWith("/public/rest/");
+    expect(buildOecdCatalogUrl().searchParams.get("detail")).toBe("allstubs");
+    expect(buildOecdCatalogUrl().searchParams.get("references")).toBe("none");
     expect(buildOecdCatalogUrl("sti-public").pathname).toStartWith("/sti-public/rest/");
     expect(buildOecdStructureUrl(tivaId,"1.1").pathname).toStartWith("/sti-public/rest/");
     const u=buildOecdDataUrl(tivaParams);
@@ -158,6 +160,99 @@ test("different searches and dimension filters share metadata downloads", async 
   expect(calls).toBe(1);
   await client.oecdGetStructure(datasetId); await client.oecdGetStructure(datasetId,undefined,"REF_AREA","kingdom");
   expect(calls).toBe(2);
+});
+
+test("concurrent catalogue searches persist only validated identifiers and names, not XML", async () => {
+  const catalogueXml = xml.replace('Consumer price indices', 'Education expenditure')
+    .replace('</s:Dataflows>', '<s:Dataflow agencyID="OECD.ELS" id="PENSIONS" version="1.0"><c:Name xml:lang="en">Pension expenditure</c:Name><c:Description>Unneeded large description</c:Description></s:Dataflow></s:Dataflows>');
+  const persisted: unknown[] = [];
+  const backend = new MemoryCacheBackend();
+  const cache = new LayeredCache(new MemoryCacheBackend(), {
+    get: key => backend.get(key),
+    set: async (key, value, ttl) => { persisted.push(value); await backend.set(key, value, ttl); },
+  });
+  let calls = 0;
+  globalThis.fetch = (async input => {
+    calls++;
+    expect(new URL(String(input)).searchParams.get("detail")).toBe("allstubs");
+    return new Response(catalogueXml);
+  }) as typeof fetch;
+  const client = new EconStatsCoreClient({}, cache);
+  const [education, pensions] = await Promise.all([client.oecdListDatasets("education expenditure"), client.oecdListDatasets("pension")]);
+  expect(education).toContain("Education expenditure");
+  expect(education).not.toContain("Pension expenditure");
+  expect(pensions).toContain("Pension expenditure");
+  expect(calls).toBe(1);
+  expect(persisted).toEqual([[
+    { agency: "OECD.SDD.TPS", id: "DSD_PRICES@DF_PRICES_ALL", version: "1.0", name: "Education expenditure" },
+    { agency: "OECD.ELS", id: "PENSIONS", version: "1.0", name: "Pension expenditure" },
+  ]]);
+  expect(await client.oecdListDatasets("pension")).toBe(pensions);
+  expect(calls).toBe(1);
+  expect(formatOecdCatalogue(parseOecdCatalogue(catalogueXml), "education", 0, 1)).toContain("Showing 1 of 1 matches");
+});
+
+test("incomplete catalogue entries fail without poisoning the shared cache", async () => {
+  let calls = 0;
+  globalThis.fetch = (async () => new Response(++calls === 1 ? xml.replace('version="1.0"', 'version=""') : xml)) as typeof fetch;
+  const client = new EconStatsCoreClient({});
+  expect(await client.oecdListDatasets("inflation")).toContain("incomplete dataset definition");
+  expect(await client.oecdListDatasets("inflation")).toContain("Consumer price indices");
+  expect(calls).toBe(2);
+});
+
+test("truncated catalogue XML is rejected rather than cached as partial discovery", async () => {
+  let calls = 0;
+  globalThis.fetch = (async () => new Response(++calls === 1 ? xml.replace('</m:Structures></m:Structure>', '') : xml)) as typeof fetch;
+  const client = new EconStatsCoreClient({});
+  expect(await client.oecdListDatasets("inflation")).toContain("incomplete or invalid XML");
+  expect(await client.oecdListDatasets("inflation")).toContain("Consumer price indices");
+  expect(calls).toBe(2);
+});
+
+test("oversized OECD bodies are cancelled during download even without Content-Length", async () => {
+  let cancelled = false;
+  globalThis.fetch = (async () => new Response(new ReadableStream<Uint8Array>({
+    start(controller) { controller.enqueue(new Uint8Array(20_000_001)); },
+    cancel() { cancelled = true; },
+  }))) as typeof fetch;
+  await expect(requestOecd(buildOecdCatalogUrl(), true)).rejects.toThrow("exceeds 20 MB");
+  expect(cancelled).toBe(true);
+  expect((await accessGovernor().snapshot("OECD")).status).toBe("invalid_response");
+});
+
+test("an oversized Content-Length rejects and cancels an unread body", async () => {
+  let cancelled = false;
+  globalThis.fetch = (async () => new Response(new ReadableStream<Uint8Array>({ cancel() { cancelled = true; } }), {
+    headers: { "Content-Length": "20000001" },
+  })) as typeof fetch;
+  await expect(requestOecd(buildOecdCatalogUrl(), true)).rejects.toThrow("exceeds 20 MB");
+  expect(cancelled).toBe(true);
+});
+test('an incomplete identity-encoded response is rejected before parsing or caching',async()=>{
+  globalThis.fetch=(async()=>new Response('short',{headers:{'Content-Length':'100'}})) as typeof fetch;
+  await expect(requestOecd(buildOecdCatalogUrl(),true)).rejects.toThrow('length does not match');
+});
+
+test("a stalled body times out even if stream cancellation never finishes", async () => {
+  let cancelled = false;
+  globalThis.fetch = (async () => new Response(new ReadableStream<Uint8Array>({
+    pull() { return new Promise(() => {}); },
+    cancel() { cancelled = true; return new Promise(() => {}); },
+  }))) as typeof fetch;
+  await expect(requestOecd(buildOecdCatalogUrl(), true, 25)).rejects.toThrow("timed out");
+  expect(cancelled).toBe(true);
+  expect((await accessGovernor().snapshot("OECD")).status).toBe("unavailable");
+}, 1000);
+
+test("failed OECD body reads do not expose upstream exception text", async () => {
+  globalThis.fetch = (async () => new Response(new ReadableStream<Uint8Array>({
+    start(controller) { controller.error(new Error("private_upstream_value")); },
+  }))) as typeof fetch;
+  const client = new EconStatsCoreClient({});
+  const result = await client.oecdListDatasets("pension");
+  expect(result).toContain("OECD unavailable");
+  expect(result).not.toContain("private_upstream_value");
 });
 test("malformed responses and rejected query sizes are actionable errors, not cached data", async () => {
   let calls=0;

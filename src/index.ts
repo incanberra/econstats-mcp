@@ -12,9 +12,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { createServer } from "node:http";
-import { randomUUID } from "node:crypto";
+import { createHttpServer, httpConfig, installShutdownHandlers, configuredPort } from "./hosting/http";
 import { z } from "zod";
 import { EconStatsCoreClient } from "./core/client";
 import { MEASURES, SOURCES } from "./core/selection";
@@ -22,6 +20,9 @@ import {renderResult} from "./core/result";
 import {AccessError,PROVIDERS} from "./core/access";
 import {COMTRADE_CLASSIFICATIONS} from './core/comtrade';
 import {OECD_SPACES,buildOecdDataUrl} from './core/oecd';
+import {PORTWATCH_DATASETS} from './core/portwatch';
+import {version} from '../package.json';
+import {phase} from './core/request-context';
 
 function txt(text: string) { return { content: [{ type: "text" as const, text }],...(/^(?:FRED|BLS|BEA|WORLD_BANK|ECB|IMF|OECD|Eurostat|BIS|EIA) error:/.test(text)?{isError:true}:{}) }; }
 function imfTxt(text: string) { return { ...txt(text), ...(text.startsWith("IMF error:") ? { isError: true } : {}) }; }
@@ -38,7 +39,7 @@ async function data(tool:string,args:Record<string,any>){
   try{buildOecdDataUrl({datasetId:args.dataset_id,space:args.space,version:args.version,seriesKey:args.series_key,startPeriod:args.start_period,endPeriod:args.end_period,limit:args.limit});}
   catch(error){return {isError:true,content:[{type:'text' as const,text:error instanceof Error?`OECD error: ${error.message}`:'OECD error: Invalid query.'}]};}
  }
- try{const result=await client.getStructuredData({tool,arguments:parameters},fresh);return {content:[{type:"text" as const,text:renderResult(result)}],structuredContent:result as unknown as Record<string,unknown>};}
+ try{const result=await client.getStructuredData({tool,arguments:parameters},fresh);const text=await phase('result.render',()=>renderResult(result));return {content:[{type:"text" as const,text}],structuredContent:result as unknown as Record<string,unknown>};}
  catch(error){return {isError:true,content:[{type:"text" as const,text:error instanceof AccessError?error.message:"Data retrieval failed validation. Check dataset metadata, parameters, credentials and provider availability; no data were inferred."}]};}
 }
 async function jsonResult(work:()=>Promise<any>){
@@ -47,9 +48,10 @@ async function jsonResult(work:()=>Promise<any>){
 }
 // ── Server ──────────────────────────────────────────────────────────────
 
+function createMcpServer() {
 const server = new McpServer({
   name: "econstats",
-  version: "3.1.0",
+  version,
 }, {
   instructions: `You are an expert economic analyst. Plain English in, cited analysis out.
 
@@ -77,6 +79,8 @@ SOURCE ROUTING:
 - Detailed European statistics → eurostat_list_datasets, eurostat_get_structure, eurostat_get_data. Use current datasets and explicit non-time filters; check coverage and dataset notes for discontinued series.
 - Credit, debt service, international banking, property prices and effective exchange rates across countries → bis_list_datasets, bis_get_structure, bis_get_data. Validate sector, valuation, adjustment, units, real/nominal definitions and breaks.
 - Energy prices, production, stocks, electricity and other energy statistics → eia_list_routes, eia_get_metadata, eia_get_data. Requires EIA_API_KEY. Distinguish spot/futures, grade/sector, units and observed statistics versus outlook projections. Never include the API key in citations.
+- Maritime disruption, shipping and chokepoints → portwatch_list_locations, portwatch_get_metadata, portwatch_get_data. Daily AIS-derived estimates. Select exact location IDs, fields and dates. Chokepoint capacity means vessel deadweight capacity, not actual cargo tonnage. Do not sum totals with their components.
+- Food, agricultural production and fertiliser security → faostat_list_domains, faostat_list_codes, faostat_get_data. Uses installed official public CSV snapshots, not live API observations. Inspect snapshot/update dates and native FAOSTAT area/item/element codes. fresh=true does not rebuild snapshots. Food availability is not inventory; nutrient and product tonnes differ.
 - ECB monetary policy, euro-area monetary aggregates and bank statistics → ecb_get_data; European inflation and national accounts → Eurostat, using comparable definitions.
 - "What is $X worth today?" → inflation_adjust
 - Release day (jobs, CPI, GDP) → check_release_calendar, then BLS/BEA direct
@@ -458,52 +462,40 @@ server.tool('comtrade_get_availability','Check final merchandise data availabili
 server.tool('comtrade_get_data','Retrieve bounded final merchandise trade for exact reporter, partner, HS products and periods in classic mode (partner2=0, customs=C00, transport=0). Values are USD, netWgt is kg; quantity uses reported units. Preview is always marked incomplete/unverified; authenticated requires a key and never falls back silently. Up to 12 requests, 500 rows per period; no wildcard downloads or automatic pagination. Native flags and HS editions are preserved. fresh=true checks revisions; use revision_history for observed changes.',
  {...comtradeSelection,partner_code:z.number().int().min(0).max(999).describe('Comtrade partner code; 0 means World'),product_codes:z.array(z.string().regex(/^(TOTAL|\d{2}|\d{4}|\d{6})$/)).min(1).max(10),flow_code:z.enum(['M','X','RM','RX']),fields:z.array(z.enum(['primaryValue','netWgt','qty'])).min(1).max(3).default(['primaryValue']),max_records:z.number().int().min(1).max(500).default(500),fresh:z.boolean().default(false)},async(args)=>data('comtrade_get_data',args));
 
-const PORT = parseInt(process.env.MCP_PORT || process.env.PORT || "0");
+server.tool('portwatch_list_locations','Search IMF PortWatch ports or chokepoints by name, ID or country. Returns exact native location IDs for bounded daily queries. Catalogue presence does not establish date coverage. No key required.',
+ {dataset:z.enum(PORTWATCH_DATASETS),query:z.string().max(200).optional(),country_iso3:z.string().regex(/^[A-Z]{3}$/).optional(),offset:z.number().int().min(0).default(0),limit:z.number().int().min(1).max(100).default(30)},
+ async({dataset,query,country_iso3,offset,limit})=>jsonResult(()=>client.portwatchListLocations(dataset,query,country_iso3,offset,limit)));
+server.tool('portwatch_get_metadata','Inspect IMF PortWatch fields, units and latest upstream edit time. Chokepoint capacity is vessel deadweight capacity; port imports/exports are estimated shipment volumes. Vessel totals overlap their component types. No key required.',
+ {dataset:z.enum(PORTWATCH_DATASETS)},async({dataset})=>jsonResult(()=>client.portwatchGetMetadata(dataset)));
+server.tool('portwatch_get_data','Fetch daily IMF PortWatch estimates for 1–5 exact port/chokepoint IDs, 1–5 fields and a date range of at most 367 days. Up to 2000 location/day rows; partial pages are flagged and require narrower queries. Returns native units, citations and observed revision tracking. No key required.',
+ {dataset:z.enum(PORTWATCH_DATASETS),location_ids:z.array(z.string()).min(1).max(5),fields:z.array(z.string()).min(1).max(5),start_date:z.string(),end_date:z.string(),limit:z.number().int().min(1).max(2000).default(1000),fresh:z.boolean().default(false)},async(args)=>data('portwatch_get_data',args));
+const faostatDomain=z.enum(['QCL','FBS','RFN','RFB']);
+server.tool('faostat_list_domains','List installed official FAOSTAT public-data snapshots: crop/livestock production, food balances, fertilisers by nutrient/product. Includes actual coverage, upstream update and download dates. No account or key required. Snapshots update when the image is rebuilt.',
+ {},async()=>jsonResult(()=>client.faostatListDomains()));
+server.tool('faostat_list_codes','Find native FAOSTAT area, item or element codes and labels within an installed domain. Use these numeric codes rather than ISO or Comtrade codes. Search each dimension before requesting data. No key required.',
+ {domain:faostatDomain,dimension:z.enum(['area','item','element']),query:z.string().max(200).optional(),offset:z.number().int().min(0).default(0),limit:z.number().int().min(1).max(100).default(30)},
+ async({domain,dimension,query,offset,limit})=>jsonResult(()=>client.faostatListCodes(domain,dimension,query,offset,limit)));
+server.tool('faostat_get_data','Query annual official FAOSTAT public snapshots from 1990 onward (FBS from 2010), using exact native area/item/element codes and explicit years. Retains units, source flags, notes, source/update/download dates and observed revisions. No live API or key. fresh only bypasses result cache; rebuild snapshots for new releases. Food availability is not inventory; nutrient and product mass differ. Limit is rows, not observations per series; narrow queries if truncated.',
+ {domain:faostatDomain,area_codes:z.array(z.string()).min(1).max(5),item_codes:z.array(z.string()).min(1).max(10),element_codes:z.array(z.string()).min(1).max(5),start_year:z.number().int().min(1990).max(2100),end_year:z.number().int().min(1990).max(2100),limit:z.number().int().min(1).max(5000).default(1000),fresh:z.boolean().default(false)},async(args)=>data('faostat_get_data',args));
+
+return server;
+}
+
+const PORT = configuredPort(process.env);
 
 if (PORT > 0) {
-  // Streamable HTTP mode — for OpenBB Workspace
-  // Use stateless mode so each request is independent
-  const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: undefined,
-  });
-  await server.connect(transport);
-
-  const httpServer = createServer(async (req, res) => {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, mcp-session-id");
-    res.setHeader("Access-Control-Expose-Headers", "mcp-session-id");
-
-    if (req.method === "OPTIONS") {
-      res.writeHead(204);
-      res.end();
-      return;
-    }
-
-    if (req.url === "/health") {
-      res.writeHead(200, { "Content-Type": "text/plain" });
-      res.end("ok");
-      return;
-    }
-
-    try {
-      await transport.handleRequest(req, res);
-    } catch (err) {
-      if (!res.headersSent) {
-        res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: String(err) }));
-      }
-    }
-  });
-
-  httpServer.listen(PORT, () => {
-    console.error(`EconStats MCP v3 running on http://localhost:${PORT} (Streamable HTTP)`);
+  const config = httpConfig(process.env);
+  const httpServer = createHttpServer(createMcpServer, config);
+  installShutdownHandlers(httpServer);
+  httpServer.listen(PORT, config.host, () => {
+    console.error(`EconStats MCP ${version} running on port ${PORT}/mcp (Streamable HTTP; ${config.auth.mode})`);
     if (process.env.PREFETCH_HOT_SERIES === "true") {
       client.prefetchReleaseDaySeries();
     }
   });
 } else {
   // Stdio mode — for Claude Desktop/Code
+  const server = createMcpServer();
   const transport = new StdioServerTransport();
   server.connect(transport).then(() => {
     console.error("EconStats MCP v3 running on stdio");

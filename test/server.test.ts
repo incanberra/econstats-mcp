@@ -2,16 +2,20 @@ import {expect,test} from 'bun:test';
 import {resolve} from 'node:path';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
+import {version} from '../package.json';
 
 test('SDK delivers methodology instructions and exposes valid public data schemas without upstream requests',async()=>{
   const transport=new StdioClientTransport({command:process.execPath,args:['run',resolve(import.meta.dir,'../src/index.ts')],env:{MCP_PORT:'0',PORT:'0',PREFETCH_HOT_SERIES:'false',ECONSTATS_DISK_CACHE:'false'},stderr:'pipe'});
   const c=new Client({name:'schema-regression',version:'1.0'});
   try{
-    await c.connect(transport);expect(c.getServerVersion()?.version).toBe('3.1.0');expect(c.getInstructions()).toContain('SOURCE ROUTING');
+    await c.connect(transport);expect(c.getServerVersion()?.version).toBe(version);expect(c.getInstructions()).toContain('SOURCE ROUTING');
     expect(c.getInstructions()).not.toContain('Quarterly figures are annualized');
     expect(c.getInstructions()).not.toContain('BLS data values are index levels');
     expect(c.getInstructions()).toContain('quarterly growth is not universally annualized');
-    const {tools}=await c.listTools();expect(tools.length).toBe(35);
+    const {tools}=await c.listTools();expect(tools.length).toBe(41);
+    for(const name of ['portwatch_list_locations','portwatch_get_metadata','portwatch_get_data','faostat_list_domains','faostat_list_codes','faostat_get_data'])expect(tools.some(t=>t.name===name)).toBe(true);
+    expect(tools.find(t=>t.name==='portwatch_get_data')!.inputSchema.required).toContain('start_date');
+    expect(tools.find(t=>t.name==='faostat_get_data')!.inputSchema.required).toContain('element_codes');
     for(const name of ['oecd_list_datasets','oecd_get_structure','oecd_get_data']){
       const schema=tools.find(t=>t.name===name)!.inputSchema;
       expect(schema.properties).toHaveProperty('space');

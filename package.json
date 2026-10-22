@@ -1,7 +1,7 @@
 {
   "name": "econstats-mcp",
-  "version": "3.1.0",
-  "description": "Economic data MCP server with ABS, UN Comtrade, structured observations and revision tracking",
+  "version": "3.2.2",
+  "description": "Economic data MCP server with PortWatch, FAOSTAT, structured observations and revision tracking",
   "type": "module",
   "bin": {
     "econstats-mcp": "./src/index.ts"
@@ -10,7 +10,9 @@
     "start": "bun src/index.ts",
     "dev": "bun --watch src/index.ts",
     "test": "bun test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "check:hosted": "bun run scripts/check-hosted.ts",
+    "build:faostat": "bun run scripts/build-faostat.ts --output faostat-data"
   },
   "keywords": [
     "mcp",
@@ -45,6 +47,7 @@
     "csv-parse": "^7.0.3",
     "fast-xml-parser": "^5.11.2",
     "i18n-iso-countries": "^7.14.0",
+    "jose": "^6.2.2",
     "zod": "^4.3.6"
   },
   "devDependencies": {

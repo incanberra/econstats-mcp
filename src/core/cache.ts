@@ -2,6 +2,7 @@ import { Redis } from "@upstash/redis";
 import {mkdir} from "node:fs/promises";
 import {join} from "node:path";
 import {atomicWrite,readStored,storageDirectory,storagePath} from "./storage";
+import {abortable,cancellation,checkCancelled,requestSignal,withWorkSignal,phase} from './request-context';
 
 export interface CacheBackend {
   get(key: string): Promise<any | null>;
@@ -12,26 +13,47 @@ export interface CacheBackend {
 type CacheEntry = {
   value: any;
   expiresAt: number;
+  bytes:number;
 };
 
 export class MemoryCacheBackend implements CacheBackend {
   private store = new Map<string, CacheEntry>();
+  private bytes=0;
+  constructor(private maxEntries=256,private maxBytes=32*1024*1024,private clock=Date.now){
+    if(!Number.isInteger(maxEntries)||maxEntries<1||!Number.isFinite(maxBytes)||maxBytes<1)throw new Error('Invalid memory cache limits.');
+  }
+  private remove(key:string){const old=this.store.get(key);if(old){this.bytes-=old.bytes;this.store.delete(key);}}
+  private prune(){for(const [key,entry] of this.store)if(entry.expiresAt<=this.clock())this.remove(key);}
+  stats(){this.prune();return {entries:this.store.size,bytes:this.bytes,maxBytes:this.maxBytes};}
 
   async get(key: string): Promise<any | null> {
+    this.prune();
     const entry = this.store.get(key);
     if (!entry) return null;
-    if (Date.now() > entry.expiresAt) {
-      this.store.delete(key);
-      return null;
-    }
+    this.store.delete(key);this.store.set(key,entry);
     return entry.value;
   }
 
   async set(key: string, value: any, ttlSeconds: number): Promise<void> {
+    this.prune();this.remove(key);
+    // A conservative bounded traversal avoids allocating another large JSON string.
+    const seen=new Set<object>();let bytes=key.length*2+128;
+    const count=(v:any):void=>{
+      if(bytes>this.maxBytes)return;
+      if(typeof v==='string'){bytes+=v.length*2+24;return;}
+      if(v&&typeof v==='object'){
+        if(seen.has(v))return;seen.add(v);bytes+=64;
+        for(const k of Object.keys(v)){bytes+=k.length*2+16;count(v[k]);if(bytes>this.maxBytes)break;}
+      }else bytes+=16;
+    };
+    count(value);
+    if(bytes>this.maxBytes||ttlSeconds<=0)return;
+    while(this.store.size>=this.maxEntries||this.bytes+bytes>this.maxBytes)this.remove(this.store.keys().next().value!);
     this.store.set(key, {
       value,
-      expiresAt: Date.now() + ttlSeconds * 1000,
+      expiresAt: this.clock() + ttlSeconds * 1000,bytes,
     });
+    this.bytes+=bytes;
   }
 }
 
@@ -75,56 +97,77 @@ export class FileCacheBackend implements CacheBackend {
 }
 
 export class LayeredCache {
-  private inFlight = new Map<string, Promise<any>>();
+  private inFlight = new Map<string,{promise:Promise<any>;controller:AbortController;waiters:number;settled:boolean}>();
 
   constructor(
     private l1: CacheBackend,
     private l2?: CacheBackend,
     private l1MaxTtlSeconds = 900,
+    private l2TimeoutMs=5000,
   ) {}
 
   async getOrCompute<T>(
     key: string,
     ttlSeconds: number,
-    compute: () => Promise<T>,
+    compute: (signal:AbortSignal) => Promise<T>,
     refresh = false,
+    signal = requestSignal(),
   ): Promise<T> {
-    const localHit = refresh ? null : await this.l1.get(key);
+    checkCancelled(signal);
+    const localHit = refresh ? null : await abortable(this.l1.get(key),signal);
+    checkCancelled(signal);
     if (localHit !== null) return localHit;
-
-    const pending = this.inFlight.get(key);
-    if (pending) return pending;
-
-    const work = (async () => {
+    let pending = this.inFlight.get(key);
+    if(!pending){
+      const entry={promise:undefined as unknown as Promise<T>,controller:new AbortController(),waiters:0,settled:false};
+      const work=async()=>{
+      checkCancelled();
       if (this.l2 && !refresh) {
         try {
-          const entry=this.l2.getEntry?await this.l2.getEntry(key):undefined;
-          const sharedHit = this.l2.getEntry?entry?.value??null:await this.l2.get(key);
+          const ioSignal=AbortSignal.any([entry.controller.signal,AbortSignal.timeout(this.l2TimeoutMs)]);
+          const stored=this.l2.getEntry?await phase('cache.read',()=>abortable(this.l2!.getEntry!(key),ioSignal)):undefined;
+          const sharedHit = this.l2.getEntry?stored?.value??null:await phase('cache.read',()=>abortable(this.l2!.get(key),ioSignal));
+          checkCancelled();
           if (sharedHit !== null) {
-            await this.l1.set(key, sharedHit, Math.min(ttlSeconds, this.l1MaxTtlSeconds,entry?.ttlSeconds??ttlSeconds));
+            await this.l1.set(key, sharedHit, Math.min(ttlSeconds, this.l1MaxTtlSeconds,stored?.ttlSeconds??ttlSeconds));
             return sharedHit;
           }
         } catch (error) {
+          checkCancelled();
           console.error("[cache] Persistent cache read failed; using source.");
         }
       }
 
-      const value = await compute();
+      const value = await abortable(compute(entry.controller.signal));
+      checkCancelled();
       await this.l1.set(key, value, Math.min(ttlSeconds, this.l1MaxTtlSeconds));
       if (this.l2) {
         try {
-          await this.l2.set(key, value, ttlSeconds);
+          await phase('cache.write',()=>abortable(this.l2!.set(key, value, ttlSeconds),AbortSignal.any([entry.controller.signal,AbortSignal.timeout(this.l2TimeoutMs)])));
         } catch (error) {
+          checkCancelled();
           console.error("[cache] Persistent cache write failed; using memory.");
         }
       }
       return value;
-    })().finally(() => {
-      this.inFlight.delete(key);
-    });
-
-    this.inFlight.set(key, work);
-    return work;
+      };
+      entry.promise=Promise.resolve().then(()=>withWorkSignal(entry.controller.signal,work)).finally(()=>{
+        entry.settled=true;
+        if(this.inFlight.get(key)===entry)this.inFlight.delete(key);
+      });
+      // A disconnected last subscriber must not leave an unhandled rejection.
+      void entry.promise.catch(()=>{});
+      this.inFlight.set(key,entry);pending=entry;
+    }
+    pending.waiters++;
+    try{return await abortable(pending.promise,signal);}
+    finally{
+      pending.waiters--;
+      if(!pending.settled&&pending.waiters===0){
+        pending.controller.abort(cancellation('no_waiters'));
+        if(this.inFlight.get(key)===pending)this.inFlight.delete(key);
+      }
+    }
   }
 }
 

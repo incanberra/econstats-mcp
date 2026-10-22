@@ -1,8 +1,9 @@
 import {mkdir} from "node:fs/promises";
 import {join} from "node:path";
 import {atomicWrite,readStored,storageDirectory,storagePath,withFileLock} from "./storage";
+import {abortable,checkCancelled,requestSignal} from './request-context';
 
-export const PROVIDERS=["FRED","BLS","BEA","IMF","OECD","EUROSTAT","BIS","EIA","WORLD_BANK","ECB","ABS","COMTRADE"] as const;
+export const PROVIDERS=["FRED","BLS","BEA","IMF","OECD","EUROSTAT","BIS","EIA","WORLD_BANK","ECB","ABS","COMTRADE","PORTWATCH","FAOSTAT"] as const;
 export type Provider=typeof PROVIDERS[number];
 export type AccessKind="healthy"|"missing_key"|"rejected_key"|"rate_limited"|"budget_exhausted"|"unavailable"|"request_rejected"|"invalid_response"|"not_checked";
 export class AccessError extends Error {
@@ -13,6 +14,8 @@ export function providerFor(url:URL):Provider {
   const hosts:Record<string,Provider>={"api.stlouisfed.org":"FRED","api.bls.gov":"BLS","apps.bea.gov":"BEA","api.imf.org":"IMF","sdmx.oecd.org":"OECD","ec.europa.eu":"EUROSTAT","stats.bis.org":"BIS","api.eia.gov":"EIA","api.worldbank.org":"WORLD_BANK","data-api.ecb.europa.eu":"ECB"};
   hosts['data.api.abs.gov.au']='ABS';
   hosts['comtradeapi.un.org']='COMTRADE';
+  hosts['services9.arcgis.com']='PORTWATCH';
+  hosts['bulks-faostat.fao.org']='FAOSTAT';
   const provider=hosts[url.hostname];if(!provider)throw new Error("Unsupported economic API host.");return provider;
 }
 export class RequestGovernor {
@@ -61,10 +64,13 @@ let governor:RequestGovernor|undefined;
 export function accessGovernor(){return governor??=new RequestGovernor(storageDirectory());}
 export function resetAccessState(){governor=undefined;}
 export async function providerFetch(input:string|URL,init?:RequestInit):Promise<Response>{
-  const url=new URL(input),provider=providerFor(url),g=accessGovernor();await g.reserve(provider);
+  checkCancelled();
+  const url=new URL(input),provider=providerFor(url),g=accessGovernor();await abortable(g.reserve(provider));checkCancelled();
+  const signals=[init?.signal??AbortSignal.timeout(30000),requestSignal()].filter((s):s is AbortSignal=>!!s);
+  const signal=AbortSignal.any(signals);
   let response:Response;
-  try{response=await fetch(url,{...init,signal:init?.signal??AbortSignal.timeout(30000)});}
-  catch{await g.record(provider,"unavailable");throw new AccessError(provider,"unavailable","Network failure or timeout. No credentials or authenticated URLs are returned.");}
+  try{response=await abortable(fetch(url,{...init,signal}),signal);}
+  catch{checkCancelled();await g.record(provider,"unavailable");throw new AccessError(provider,"unavailable","Network failure or timeout. No credentials or authenticated URLs are returned.");}
   if(!response.ok){
     const status=response.status;
     let kind:AccessKind=status===429?"rate_limited":status===401||(status===403&&(["FRED","BEA","BLS","EIA"].includes(provider)||provider==='COMTRADE'&&new Headers(init?.headers).has('Ocp-Apim-Subscription-Key')))?"rejected_key":status>=500?"unavailable":"request_rejected";
@@ -77,5 +83,5 @@ export async function providerFetch(input:string|URL,init?:RequestInit):Promise<
     await g.record(provider,kind,status,status===429?Math.max(1000,Number.isFinite(delay)?delay:60000):0);
     throw new AccessError(provider,kind,`HTTP ${status}. ${kind==="rejected_key"?"Provider rejected the API key; check registration/activation.":kind==="rate_limited"?"Retry after the provider cooldown.":status===413?"Query too large. Specify start_period and end_period and narrow the selection.":"Check endpoint availability and request parameters."}`);
   }
-  await g.record(provider,"healthy",response.status);return response;
+  await abortable(g.record(provider,"healthy",response.status));checkCancelled();return response;
 }
