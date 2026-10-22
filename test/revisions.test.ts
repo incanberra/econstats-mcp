@@ -5,7 +5,14 @@ import {join} from 'node:path';
 import {RevisionTracker} from '../src/core/revisions';
 import {dataSeries,observation,finishResult} from '../src/core/result';
 import {storagePath} from '../src/core/storage';
+import {MemoryCacheBackend} from '../src/core/cache';
 const make=(time:string,values:[string,number|null,string?][]= [['2026-07',1]],unit='percent')=>finishResult('ABS',{},[dataSeries('ABS:TEST(1.0)',{FREQ:'M',MEASURE:'TEST'},'https://example.org/data',{unit,unitMultiplier:0,observations:values.map(([p,v,status])=>observation(p,v,status?{OBS_STATUS:status}:{}))})],`2026-10-${time}T00:00:00.000Z`);
+test('oversized in-memory revision snapshots do not prevent usable data being returned',async()=>{
+  const tracker=new RevisionTracker(undefined,50,new MemoryCacheBackend(1,100));
+  const result=await tracker.track(make('01'));
+  expect(result.series[0].observations[0].value).toBe(1);expect(result.series[0].revision!.status).toBe('unavailable');
+  expect(result.notes.join(' ')).toContain('bounded');
+});
 test('revision tracker distinguishes baseline, extensions, value revisions, missing changes and flag changes',async()=>{
   const t=new RevisionTracker(undefined),base=make('01');const first=await t.track(base);expect(first.series[0].revision!.status).toBe('baseline');expect(base.series[0].revision).toBeUndefined();
   const next=await t.track(make('02',[['2026-07',2],['2026-08',null]]));expect((next.series[0].revision!.changes as any[]).map(c=>c.kind)).toEqual(['value_changed','new_observation']);

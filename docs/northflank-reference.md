@@ -136,8 +136,8 @@ The repository's `.env.example` contains names and examples only. The Docker
 build context allowlist excludes `.env`, private keys, Git history and local data.
 
 Keep `PREFETCH_HOT_SERIES=false` (the image default) for a small personal service.
-`MCP_MAX_CONCURRENT` defaults to 16; excess requests receive 429 with `Retry-After`.
-Bodies are limited to 1 MiB, each request has a 90-second deadline, and each POST
+`MCP_MAX_CONCURRENT` defaults to 4; excess requests receive 429 with `Retry-After`.
+Bodies are limited to 1 MiB, each request has a 55-second deadline, and each POST
 gets a separate stateless MCP server/transport with shared provider caches/budgets.
 GET/DELETE on `/mcp` return 405: there is no long-lived SSE/session channel. Clients
 must support standard Streamable HTTP with JSON responses.
@@ -167,7 +167,7 @@ responses but does not persist revision history or local request budgets.
 
 The GitHub Checks workflow runs source tests and builds the actual production
 image on Linux, then tests health, denied anonymous access, concurrent real MCP
-clients, all 35 tool schemas, offline readiness and a non-root runtime. It also
+clients, all 41 tool schemas, offline readiness and a non-root runtime. It also
 checks that an unconfigured production container fails and shutdown exits cleanly.
 
 After deployment:
@@ -224,6 +224,71 @@ check, making catalogue memory pressure a plausible cause of hosted failures.
 Hosting logs are still needed to confirm whether a particular incident was an
 out-of-memory restart. The existing per-request server/transport handling in
 this deployment branch was already correct and is retained.
+
+### OECD retrieval and hosting reliability (3.2.2)
+
+The hosted server now uses Bun's native HTTP API and the MCP SDK's
+`WebStandardStreamableHTTPServerTransport`, with a fresh MCP server and stateless
+transport for every request. In the pinned Bun runtime, an abandoned request was
+not reliably reported through the Node HTTP compatibility adapter's response
+close event. A regression test reproduces cancellation through an actual HTTP
+client and verifies that the OECD response body is cancelled when the last
+subscriber leaves. Cancelling one coalesced subscriber does not cancel another.
+
+Bun's default idle timeout is 10 seconds and includes handlers which have not yet
+written response bytes. Accepted MCP requests explicitly receive an idle timeout
+five seconds longer than the operation deadline, so a silent valid query can
+complete or return a controlled 504 first. `MCP_REQUEST_TIMEOUT_MS` defaults to
+`55000` and accepts 1000–90000; the deadline includes authentication, queueing,
+metadata, observations and result preparation. Client disconnects and deadlines
+propagate through shared cache subscribers, provider requests and parsing. Work
+stops when its last subscriber leaves; validation failures and work cancelled
+before validation cannot publish late cache entries.
+
+Structure discovery and structured observations now share one parsed definition
+cache (`oecd:definition:v2`). Raw metadata is not retained under separate discovery
+and retrieval cache entries. The resolved metadata version is pinned when building
+the observation URL. Definition and observation parsing run in a single isolated
+Bun subprocess with no provider credentials or automatic environment-file loading;
+the HTTP event loop remains available for health checks. Parsing has a 30-second
+budget, an 8 MiB output limit and a queue limited to 16 jobs / 24 MiB estimated
+input storage. The subprocess is killed on cancellation and must exit before the
+next parser starts. OECD metadata/data download-and-parse stages are serialised,
+preventing concurrent buffered downloads from multiplying memory consumption.
+Existing 20 MB streaming and 30-second provider limits remain in force.
+
+The main container also uses Bun's `--smol` mode. Memory responses use a 256-entry,
+32 MiB estimated LRU budget, with expired entries pruned on access. Memory-only
+revision history has a separate 256-entry / 16 MiB estimated budget and may evict
+older series; it is not a durable archive. Optional persistent cache reads and
+writes have five-second budgets and fall back to the source or memory on failure.
+These application budgets are conservative estimates, not hard process-RSS limits.
+The container memory limit is still enforced by the host.
+
+Credential-free JSON `request_phase` logs identify authentication, body reading,
+transport handling, cache I/O, queueing, metadata download/parse, observation
+download/parse, revision tracking and text preparation. They contain
+the server request ID, application version, elapsed time, completion/cancellation/
+failure status and parent-process memory usage. HTTP logs also report maximum
+sampled event-loop delay. `response_ready` means the application prepared a
+response; it is not proof that a remote client received it. Arguments, tokens,
+provider content and raw exceptions are not logged. `/health` remains public
+liveness, with version and request-ID headers; provider health is checked separately.
+
+CI retains the production-image authentication/protocol/snapshot/shutdown check,
+then runs another copy of that same image with 256 MiB RAM and 0.1 CPU. A test-only
+preload supplies captured full OECD metadata (1,256,011 bytes) and the actual
+France/Australia/US government-spending CSV. It exercises cold/coalesced requests,
+adding the US, warm cache reuse, health responsiveness, two-client cancellation
+and a fresh successful retrieval afterward. Fixtures are mounted read-only and
+are not copied into the production image or enabled by its entrypoint. The CI
+run records the container's peak memory. Unit tests also cover a silent request
+longer than ten seconds, explicit deadlines, cancelled parsers, malformed/truncated
+responses, cache eviction, queued cancellation and optional-cache stalls.
+
+This repairs reproduced failure modes. A specific historical outage still needs
+Northflank request/restart/proxy logs for definitive attribution; external provider
+and network failures remain possible and should produce bounded, traceable errors.
 
 ## Local development
 

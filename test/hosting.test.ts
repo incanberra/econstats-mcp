@@ -6,7 +6,9 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT } from "jose";
 import { AuthFailure, authConfig, createVerifier, type AuthConfig } from "../src/hosting/auth";
-import { configuredPort, createHttpServer, httpConfig } from "../src/hosting/http";
+import { configuredPort, createHttpServer, httpConfig,type HostedServer } from "../src/hosting/http";
+import {requestSignal,abortable} from '../src/core/request-context';
+import {version} from '../package.json';
 
 const token = "test-only-" + "a".repeat(48);
 let child: ReturnType<typeof Bun.spawn>;
@@ -43,7 +45,7 @@ afterAll(async () => {
     expect(logs).not.toContain("private_tool_name");
     expect(logs).toContain("tool=connection_health");
     expect(logs).toContain("request_id=");
-    expect(logs).toContain("version=3.2.1");
+    expect(logs).toContain(`version=${version}`);
   }
 });
 
@@ -67,7 +69,7 @@ test("hosted configuration fails closed; development stdio remains available", (
 test("public health works but missing/wrong credentials cannot discover or call tools", async () => {
   const health = await fetch(`${base}/health`);
   expect(await health.text()).toBe("ok");
-  expect(health.headers.get("x-econstats-version")).toBe("3.2.1");
+    expect(health.headers.get("x-econstats-version")).toBe(version);
   expect(health.headers.get("x-request-id")).toMatch(/^[a-f0-9-]{36}$/);
   for (const path of ["/mcp", "/mcp?token=ignored"]) {
     const response = await fetch(`${base}${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
@@ -167,11 +169,43 @@ test("concurrency is bounded before authentication completes", async () => {
   } finally { release(); await first; await close(http); }
 });
 
-async function listen(http: Server) {
+test('HTTP deadline cancels work and releases capacity while health stays responsive',async()=>{
+  let cancelled=false;
+  const http=createHttpServer(()=>{
+    const server=new McpServer({name:'deadline',version:'1'});
+    server.tool('wait',{},async()=>{
+      const signal=requestSignal()!;signal.addEventListener('abort',()=>{cancelled=true;},{once:true});
+      await abortable(new Promise(()=>{}));return {content:[]};
+    });return server;
+  },{...httpConfig({}),maxConcurrent:1,requestTimeoutMs:50});
+  const url=await listen(http);
+  try{
+    const pending=fetch(`${url}/mcp`,{method:'POST',headers,body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'wait',arguments:{}}})});
+    expect((await fetch(`${url}/health`)).status).toBe(200);
+    const response=await pending;expect(response.status).toBe(504);expect(await response.text()).toContain('timed out');
+    expect(cancelled).toBe(true);await Bun.sleep(5);
+    expect((await fetch(`${url}/mcp`,{headers})).status).toBe(405);
+  }finally{await close(http);}
+});
+
+test('a silent query can outlive Bun’s default 10-second idle timeout and still return its result',async()=>{
+  const http=createHttpServer(()=>{
+    const server=new McpServer({name:'slow',version:'1'});
+    server.tool('slow',{},async()=>{await Bun.sleep(10500);return {content:[{type:'text' as const,text:'completed'}]};});return server;
+  },{...httpConfig({}),requestTimeoutMs:15000});
+  const url=await listen(http);
+  try{
+    const pending=fetch(`${url}/mcp`,{method:'POST',headers,body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'slow',arguments:{}}})});
+    await Bun.sleep(10100);expect((await fetch(`${url}/health`)).status).toBe(200);
+    const response=await pending;expect(response.status).toBe(200);expect(await response.text()).toContain('completed');
+  }finally{await close(http);}
+},20000);
+
+async function listen(http: Server|HostedServer) {
   await new Promise<void>(resolve => http.listen(0, "127.0.0.1", resolve));
   return `http://127.0.0.1:${(http.address() as { port: number }).port}`;
 }
-async function close(http: Server) {
+async function close(http: Server|HostedServer) {
   await new Promise<void>((resolve, reject) => {
     http.close(error => error ? reject(error) : resolve());
     http.closeAllConnections();

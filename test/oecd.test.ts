@@ -229,6 +229,10 @@ test("an oversized Content-Length rejects and cancels an unread body", async () 
   await expect(requestOecd(buildOecdCatalogUrl(), true)).rejects.toThrow("exceeds 20 MB");
   expect(cancelled).toBe(true);
 });
+test('an incomplete identity-encoded response is rejected before parsing or caching',async()=>{
+  globalThis.fetch=(async()=>new Response('short',{headers:{'Content-Length':'100'}})) as typeof fetch;
+  await expect(requestOecd(buildOecdCatalogUrl(),true)).rejects.toThrow('length does not match');
+});
 
 test("a stalled body times out even if stream cancellation never finishes", async () => {
   let cancelled = false;

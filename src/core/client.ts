@@ -11,6 +11,9 @@ import {selectSource, type SelectionParams} from "./selection";
 import {buildEiaMetadataUrl,buildEiaDataUrl,validateEiaMetadata,validateEiaSelection,formatEiaRoutes,formatEiaMetadata,formatEiaFacets,formatEiaData,requestEia,type EiaDataParams} from "./eia";
 import {fetchStructured} from './structured-data';
 import {RevisionTracker} from './revisions';
+import {getOecdDefinition} from './oecd-metadata';
+import {formatOecdDefinition} from './oecd';
+import {phase} from './request-context';
 import {ABS_CATALOG_URL,absCatalogue,absStructure,buildAbsStructureUrl,requestAbs,sdmxDefinition} from './abs';
 import {dataSeries,finishResult} from './result';
 import type {Retrieval} from './selection';
@@ -109,7 +112,10 @@ export class EconStatsCoreClient {
     }),null,2);
   }
 
-  async getStructuredData(request:Retrieval,fresh=false){return this.revisions.track(await fetchStructured(request,this.env,this.cache,fresh));}
+  async getStructuredData(request:Retrieval,fresh=false){
+    const result=await fetchStructured(request,this.env,this.cache,fresh);
+    return phase('result.revisions',()=>this.revisions.track(result));
+  }
   async revisionHistory(seriesId:string,limit=10){return this.revisions.history(seriesId,limit);}
   async portwatchListLocations(dataset:PortwatchDataset,query?:string,country?:string,offset=0,limit=30){return portwatchLocations(this.cache,dataset,query,country,offset,limit);}
   async portwatchGetMetadata(dataset:PortwatchDataset){return portwatchMetadata(this.cache,dataset);}
@@ -426,13 +432,7 @@ export class EconStatsCoreClient {
 
   async oecdGetStructure(datasetId: string, version?: string, dimensionId?: string, query?: string, space?: OecdSpace): Promise<string> {
     try {
-      const url = buildOecdStructureUrl(datasetId, version, space);
-      const xml = await this.cache.getOrCompute(`oecd:structure:v1:${url}`, TTL.oecdMetadata, async () => {
-        const text = await requestOecd(url, true);
-        formatOecdStructure(text, datasetId, version, undefined, "", space);
-        return text;
-      });
-      return formatOecdStructure(xml, datasetId, version, dimensionId, query, space);
+      return formatOecdDefinition(await getOecdDefinition(this.cache,datasetId,version,space),datasetId,dimensionId,query,space);
     } catch (error) {
       return `OECD error: ${error instanceof Error ? error.message : "Request failed"}`;
     }
