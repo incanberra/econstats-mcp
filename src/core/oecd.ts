@@ -1,3 +1,4 @@
+import {rankCatalogue} from './catalogue-search';
 import { parse } from "csv-parse/sync";
 import {providerFetch, AccessError, accessGovernor} from "./access";
 import { XMLParser, XMLValidator } from "fast-xml-parser";
@@ -106,19 +107,7 @@ export function parseOecdCatalogue(xml: string): OecdDataset[] {
 export function formatOecdCatalogue(catalogue: OecdDataset[], query = "", offset = 0, limit = 20, space?: OecdSpace): string {
   const catalogUrl = buildOecdCatalogUrl(space);
   if (!Number.isInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 50) throw new Error("Invalid catalogue pagination: offset >= 0, limit 1–50.");
-  const synonyms: Record<string,string[]> = { inflation:["inflation","consumer price","cpi","hicp"], gdp:["gdp","gross domestic product","national accounts"] };
-  const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
-  const flows = catalogue.filter(f => terms.every(t => {
-    const text = `${f.agency},${f.id} ${f.name}`.toLowerCase();
-    return (synonyms[t] ?? [t]).some(word => text.includes(word));
-  })).sort((a,b) => {
-    const relevance = (f: any) => {
-      const title = f.name.toLowerCase();
-      return (terms.includes("inflation") && /consumer price|hicp|inflation rate/.test(title) ? 10 : 0) +
-        (terms.includes("gdp") && /national accounts|gross domestic product/.test(title) ? 10 : 0);
-    };
-    return relevance(b)-relevance(a);
-  });
+  const flows = rankCatalogue(catalogue, query, f=>({id:`${f.agency},${f.id}`,name:f.name}));
   const rows = flows.slice(offset, offset+limit).map(f => `${f.agency},${f.id} (version ${f.version}): ${f.name} [space=${resolveOecdSpace(`${f.agency},${f.id}`, space)}]`);
   return `${rows.join("\n") || "No matching OECD datasets on this page."}\nShowing ${rows.length} of ${flows.length} matches (offset ${offset}). Use offset to continue. Inspect oecd_get_structure before constructing a series_key. TiVA requires explicit start_period and end_period.\nSource: ${catalogUrl}`;
 }

@@ -103,3 +103,22 @@ test('structured cache stores only validated evidence and preserves retrieval ti
  await expect(selectionEvidence(r,{FRED_KEY:'secret'},cache)).rejects.toThrow('transformation');bad=false;
  const e=await selectionEvidence(r,{FRED_KEY:'secret'},cache),again=await selectionEvidence(r,{FRED_KEY:'secret'},cache);expect(calls).toBe(4);expect(again.retrievedAt).toBe(e.retrievedAt);expect(JSON.stringify(e)).not.toContain('secret');
 });
+test('historical FRED verification sends date bounds to the provider',async()=>{
+ const seen:URL[]=[];
+ globalThis.fetch=(async(input:any)=>{const u=new URL(input);seen.push(u);return new Response(JSON.stringify(u.pathname.endsWith('/observations')?{units:'pc1',observations:[{date:'2020-01-01',value:'2'}]}:fredInfo));}) as typeof fetch;
+ const e=await selectionEvidence({tool:'fred_get_series',arguments:{...fredArgs,start_period:'2020-01-01',end_period:'2020-01-31'}},{FRED_KEY:'test-only'},createLayeredCache());
+ const request=seen.find(u=>u.pathname.endsWith('/observations'))!;
+ expect(request.searchParams.get('observation_start')).toBe('2020-01-01');expect(request.searchParams.get('observation_end')).toBe('2020-01-31');expect(e.observations[0].period).toBe('2020-01');
+});
+test('BLS historical range is filtered before trimming baseline and later-year observations',async()=>{
+ const rows=Array.from({length:144},(_,i)=>({year:String(2009+Math.floor(i/12)),period:`M${String(i%12+1).padStart(2,'0')}`,value:'100',calculations:{pct_changes:{'12':'2'}}}));
+ globalThis.fetch=(async()=>new Response(JSON.stringify(bls(rows)))) as typeof fetch;
+ const e=await selectionEvidence({tool:'bls_get_series',arguments:{series_ids:['CUUR0000SA0'],start_year:'2009',end_year:'2020'}},{},createLayeredCache(),{startPeriod:'2010-05',endPeriod:'2020-04'});
+ expect(e.observations).toHaveLength(120);expect(e.observations[0].period).toBe('2010-05');expect(e.observations.at(-1)!.period).toBe('2020-04');
+});
+test('historical OECD verification sends both dates and does not request latest observations',async()=>{
+ let seen:URL|undefined;
+ globalThis.fetch=(async(input:any)=>{seen=new URL(input);return new Response(oecdHeader+oecdRow.replace('2026-08','2020-01'));}) as typeof fetch;
+ const e=await selectionEvidence({tool:'oecd_get_data',arguments:{dataset_id:'OECD.SDD.TPS,DSD_PRICES@DF_PRICES_ALL',series_key:'USA.M.N.CPI.PA._T.N.GY',start_period:'2020-01',end_period:'2020-01',limit:1}},{},createLayeredCache());
+ expect(seen!.searchParams.get('startPeriod')).toBe('2020-01');expect(seen!.searchParams.get('endPeriod')).toBe('2020-01');expect(seen!.searchParams.has('lastNObservations')).toBe(false);expect(e.observations[0].period).toBe('2020-01');
+});
