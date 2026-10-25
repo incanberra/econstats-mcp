@@ -4,7 +4,16 @@ Coverage checked 16 October 2026 UTC • EconStats v3.1
 
 ## What EconStats gives you
 
-EconStats connects natural-language requests to economic and statistical databases. The installed interface exposes **12 providers**: ABS, FRED, BLS, BEA, IMF, World Bank, OECD, Eurostat, BIS, ECB, EIA and UN Comtrade. It is particularly useful for official economic time series, country comparisons, commodity prices, international financial exposures and selected trade queries.
+EconStats connects natural-language requests to economic and statistical databases. Version 3.2 exposes **14 providers**: ABS, FRED, BLS, BEA, IMF, World Bank, OECD, Eurostat, BIS, ECB, EIA, UN Comtrade, IMF PortWatch and FAOSTAT. It supports official economic time series, country comparisons, commodity prices, international financial exposures, selected trade queries, maritime disruption analysis and food/fertiliser security.
+
+**New in 3.2:** use `portwatch_list_locations`, `portwatch_get_metadata` and
+`portwatch_get_data` for daily AIS-derived port/chokepoint estimates. Use
+`faostat_list_domains`, `faostat_list_codes` and `faostat_get_data` for installed
+official public snapshots of QCL, FBS, RFN and RFB. Neither requires a key.
+FAOSTAT coverage starts in 1990 (FBS in 2010); inspect actual end years and
+snapshot dates. These domains use their own discovery tools rather than the
+curated macroeconomic `select_source` registry. See [coverage, testing and refresh
+instructions](security-data.md).
 
 This guide describes the **installed connection**, rather than everything each organisation publishes. A dataset appearing in a catalogue does not establish that every country, variable or observation can be retrieved. Exact coverage, definitions and freshness need checking for each substantive request. [1–13]
 

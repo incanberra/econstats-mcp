@@ -1,0 +1,15 @@
+# Allowlist the build inputs: .env files, keys, Git metadata and local caches
+# cannot enter the image or even the build context.
+**
+!Dockerfile
+!.dockerignore
+!package.json
+!bun.lock
+!src/
+!src/**
+!scripts/
+!scripts/build-faostat.ts
+**/.env
+**/.env.*
+**/*.pem
+**/*.key

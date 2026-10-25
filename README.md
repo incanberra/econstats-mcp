@@ -1,6 +1,92 @@
 # econstats-mcp
 
-Economic data MCP server with an economist's methodology guide. Connects FRED, BLS, BEA, IMF, OECD, Eurostat, BIS, EIA, World Bank, ECB, ABS and UN Comtrade to any MCP-compatible client.
+Economic data MCP server with an economist's methodology guide. Connects FRED, BLS, BEA, IMF, OECD, Eurostat, BIS, EIA, World Bank, ECB, ABS, UN Comtrade, IMF PortWatch and FAOSTAT to any MCP-compatible client.
+
+## Version 3.2: shipping, food and fertiliser security
+
+Adds **six tools**, bringing the server to **41 tools across 14 providers**:
+
+- **IMF PortWatch:** search ports/chokepoints, inspect fields and retrieve daily
+  vessel calls, estimated port shipment volumes and chokepoint vessel capacity.
+- **FAOSTAT:** discover installed domains/codes and query official public-data
+  snapshots for crop/livestock production, food balances and fertilisers by
+  nutrient/product. Annual data from 1990 onward where available; FBS from 2010.
+
+Neither addition needs an API key. Docker prepares FAOSTAT's searchable snapshots
+at build time so hosted queries fit the small Northflank runtime. Snapshots
+retain release/download dates and do not update during a tool call. A build
+without cache downloads newer releases; `fresh=true` only bypasses result caches.
+For local stdio, run `bun run build:faostat` once before using the FAOSTAT tools.
+
+See [testing prompts, access details and rollback instructions](docs/security-data.md).
+The previous working 35-tool source is saved as GitHub branch
+`backup/working-before-portwatch-faostat-2026-10-20` and tag
+`working-before-portwatch-faostat-2026-10-20` at commit `af2c77b`.
+
+## Cloud deployment: Northflank and ChatGPT
+
+EconStats is deployed from this GitHub repository to a Northflank combined build
+and deployment service. ChatGPT connects to the hosted `/mcp` endpoint using
+Auth0 OAuth. Sign-in and discovery of all **35 tools** were verified on
+19 October 2026; public health and OAuth resource metadata were checked again
+on 20 October 2026 and returned HTTP 200.
+
+| Setting | Current deployment |
+| --- | --- |
+| Northflank project / service | `default` / `econstatsmcp` |
+| MCP endpoint | https://p01--econstatsmcp--yg9w56v8wz4m.code.run/mcp |
+| Public liveness check | https://p01--econstatsmcp--yg9w56v8wz4m.code.run/health |
+| GitHub deployment branch | `codex/northflank-deployment` |
+| Pull request | [#11](https://github.com/incanberra/econstats-mcp/pull/11), open draft at this checkpoint |
+| Build / port | Root `Dockerfile`; container port `3000`; HTTPS provided by Northflank |
+| Authentication | `MCP_AUTH_MODE=oauth`; Auth0 JWT access tokens; scope `econstats:read`; explicit user allowlist |
+| Storage | Memory-only by default; cache, budgets and observed revision history reset on restart |
+
+The deployment branch remains the live source until PR #11 is merged. The
+deployment changes are not yet on `main`. The container uses pinned Bun 1.3.10,
+runs as a non-root user and creates a separate stateless MCP server/transport per
+request. It also provides request limits, graceful shutdown and connection logs
+that omit credentials. GitHub checks cover regressions and the production image.
+Local stdio clients remain available independently of the cloud service.
+
+### Add or update cloud API keys
+
+Open the Northflank service's **Environment** page, choose **Continue → Edit →
+Add variable**, then enter each provider key you use:
+
+`FRED_API_KEY`, `BEA_API_KEY`, `EIA_API_KEY`, optional `BLS_API_KEY`, and
+`COMTRADE_API_KEY` for authenticated Comtrade access.
+
+Use the key itself as the value, without surrounding quotes. Preserve the existing
+OAuth settings, select **Update & restart**, and wait for **Running**. Provider
+keys belong in runtime variables, not build arguments, the repository or ChatGPT
+messages. A local `.env` file is excluded from the Docker build and is **not
+automatically copied to Northflank**.
+
+Check providers through the **cloud-connected** EconStats app, for example:
+
+```json
+{"sources":["FRED","BLS","BEA"],"probe":true}
+```
+
+Use that object with `connection_health`; check EIA and Comtrade separately if
+configured. A fresh local MCP process successfully loaded a BLS key and completed
+a live BLS probe on 20 October 2026. That does **not** verify the cloud BLS key or
+other cloud provider credentials. Public `/health` only confirms process liveness.
+
+### If ChatGPT authentication succeeds but discovery fails
+
+The deployed service initially returned HTTP 403 with diagnostic reason
+`subject_not_allowed`: `MCP_OAUTH_SUBJECTS` contained only `auth0`. Saving the
+**complete Auth0 User ID**, including the `|` and everything after it, fixed the
+problem. Restart the service after changing runtime variables, then use
+ChatGPT's **Refresh tools**. Confirm successful `initialize` and `tools/list`
+responses in Northflank logs before starting a new chat. Do not remove the
+allowlist or disable authentication to bypass this error.
+
+See the [short Northflank setup guide](docs/northflank.md),
+[full hosting and OAuth reference](docs/northflank-reference.md), and
+[deployment checkpoint](docs/cloud-deployment-checkpoint-2026-10-20.md).
 
 ## Data guide
 
@@ -8,9 +94,9 @@ See the [EconStats data guide](docs/data-guide.md) for provider coverage, key da
 
 ## Version 3: ABS, structured data and observed revisions
 
-Version 3.1 adds [UN Comtrade discovery, availability and bounded merchandise trade retrieval](docs/comtrade.md). The server exposes 35 tools. Preview access requires no key and always reports unverified completeness; authenticated retrieval uses an optional local `COMTRADE_API_KEY`. Installations now follow the maintained `main` branch.
+Version 3.1 added [UN Comtrade discovery, availability and bounded merchandise trade retrieval](docs/comtrade.md). Preview access requires no key and always reports unverified completeness; authenticated retrieval uses an optional local `COMTRADE_API_KEY`. The cloud service follows `codex/northflank-deployment` as described above; local installations may follow `main`.
 
-All twelve direct observation tools return MCP `structuredContent` using the same
+All fourteen direct observation tools return MCP `structuredContent` using the same
 `schemaVersion: "1.0"` contract. The accompanying text is rendered from those exact
 records. Search/catalogue tools keep their existing interfaces unless noted.
 This is a major version because direct text formatting and BLS presentation changed.
@@ -408,7 +494,15 @@ Call `select_source` before choosing between overlapping providers. It uses a cu
 
 Example: `{"measure":"headline_cpi_yoy","countries":["US","GB"],"observations":12}` checks national CPI year-on-year definitions through OECD and IMF. `hicp_yoy` is a separate measure. `real_gdp_growth_qoq`, `real_gdp_growth_annualized` and `real_gdp_level` are distinct. Use `preferred_source` to preserve an explicit source override, `max_age_days` to require a freshness threshold, and `verify:false` for an explicitly unverified plan without network requests.
 
-For comparisons the selector requests extra history to accommodate publication lags, finds actual common periods, and returns the matched values and observation flags in `verification.countries[].alignedObservations`. Each country includes its checked definition, source URLs and original `retrievedAt` timestamp. Use these values for the verified comparison; another retrieval may contain revisions. The latest common period takes precedence among valid candidates, followed by source suitability. Explicit source preferences are never silently replaced. Common observations need not be consecutive: the exact periods are listed.
+For comparisons the selector requests extra history to accommodate publication lags, finds actual common periods, and returns the matched values and observation flags in `verification.countries[].alignedObservations`. Each country includes its checked definition, source URLs and original `retrievedAt` timestamp. Use these values for the verified comparison; another retrieval may contain revisions. `purpose="latest"` prioritises the latest common period, then source suitability. `purpose="comparison"` prioritises suitability for comparable definitions, then freshness. `purpose="release"` prioritises original-producer suitability, then freshness. Definition, coverage and `max_age_days` checks apply before ranking for every purpose. Explicit source preferences are never silently replaced. Common observations need not be consecutive: the exact periods are listed.
+
+Supply `start_period` and `end_period` for historical requests. Whole-year bounds expand to the requested frequency (for example, quarterly `2020`–`2021` means `2020-Q1`–`2021-Q4`). If both bounds are supplied and `observations` is omitted, all monthly, quarterly or annual periods in the range are required, up to 120; split longer verification requests. An explicit `observations` count requests that many latest common observations inside the range. Daily/weekly requests retain an observation-count requirement rather than assuming every calendar day has a value. Requested dates are propagated to the provider and out-of-range observations cannot verify the request. FRED also accepts `start_period`/`end_period` as full dates in its direct data tool. Historical checks return current revised data, not vintage data.
+
+The selector now routes merchandise trade to Comtrade, value-added questions to OECD TiVA, agricultural production/food/fertiliser questions to FAOSTAT, and shipping questions to PortWatch. These routes return `discovery_required`, a `recommendedSource`, callable discovery steps and requirements for exact codes, units, dates and coverage. `selected` remains null until a registered evidence adapter can verify an exact series; a discovery plan is never labelled verified. A missing Comtrade key returns `source_unavailable`, with public discovery still available. Explicit source preferences remain binding. Unsupported cross-country GDP templates also return OECD/IMF discovery routes rather than pretending that no data exists.
+
+Use `partner_countries`, `product_query`, `product_codes`, `classification`, `industry_query`, `location_query` and `location_type` where appropriate. For foreign value added in final demand, `countries` are final-demand destinations and `partner_countries` are origins; for domestic value added in exports, they are exporters and destinations respectively. Native codes must be resolved through provider discovery. See [source selection examples and limits](docs/source-selection.md).
+
+OECD, IMF, ABS, BIS, Eurostat, World Bank and EIA catalogue searches rank economic concepts and synonyms while treating geography, frequency and transformation words as ranking context. Exact dataset identifiers stay exact. National GDP searches penalise regional and household-distribution tables unless requested. Equal-relevance Eurostat results retain preference for current coverage. These are discovery rankings, not proof of matching statistical definitions. EIA search remains confined to the selected route's children.
 
 Real GDP levels and GDP growth default to quarterly frequency. Explicit incompatible frequencies are declined. FRED period-start dates are interpreted using the returned frequency metadata; daily data cannot pass as monthly data just by truncating dates. BLS inflation and payroll changes use reported calculations where supplied, or an explicitly labelled calculation from the exact prior-year/prior-month observation in the same series. Missing or conflicting baselines cannot verify a change. BEA GDP keeps the API row's unit multiplier, which may differ from the display scale in a published table heading, and obtains the chained-dollar reference year from the table notes.
 
@@ -483,7 +577,7 @@ The cache layer also deduplicates in-flight requests, so a burst of identical Op
 
 Startup prefetch is disabled by default because short-lived stdio clients can create unnecessary upstream traffic. Turn it on only when you are running a persistent shared MCP service.
 
-## Tools (27)
+## Tools (41)
 
 | Tool | Description |
 |------|-------------|
@@ -491,9 +585,9 @@ Startup prefetch is disabled by default because short-lived stdio clients can cr
 | `connection_health` | Inspect credentials, access status, budgets/cooldowns; optionally probe live endpoints |
 | `fred_search` | Search FRED series by keyword |
 | `fred_get_series` | Fetch FRED data with transformations (YoY%, change, etc.) |
-| `bls_get_series` | Fetch BLS data with pre-computed YoY% and monthly changes |
+| `bls_get_series` | Fetch native BLS levels, available calculations and flags |
 | `bls_series_lookup` | Find BLS series IDs by keyword |
-| `bea_get_data` | BEA national accounts (GDP components, state data) |
+| `bea_get_data` | BEA NIPA national accounts; regional/state API not exposed |
 | `imf_list_datasets` | Search the current IMF dataset catalogue |
 | `imf_get_structure` | Look up ordered dimensions and current codes |
 | `imf_get_data` | Fetch current IMF SDMX data with source attribution |
@@ -514,10 +608,27 @@ Startup prefetch is disabled by default because short-lived stdio clients can cr
 | `ecb_get_data` | ECB data (euro area rates, HICP, money supply) |
 | `inflation_adjust` | Convert dollar amounts between dates using CPI-U |
 | `check_release_calendar` | Check if today is a data release day |
+| `abs_list_datasets` | Search ABS datasets |
+| `abs_get_structure` | Inspect ABS dimensions, versions and codes |
+| `abs_get_data` | Fetch exact ABS observations with native units and flags |
+| `revision_history` | Inspect locally observed revisions and snapshots |
+| `comtrade_list_reference` | Discover native trade area, flow and unit codes |
+| `comtrade_search_products` | Search HS products and hierarchy |
+| `comtrade_get_availability` | Check reporter/period publication availability |
+| `comtrade_get_data` | Retrieve bounded merchandise trade with completeness caveats |
+| `portwatch_list_locations` | Search ports and maritime chokepoints |
+| `portwatch_get_metadata` | Inspect shipping fields, units and edit dates |
+| `portwatch_get_data` | Retrieve daily AIS-derived shipping estimates |
+| `faostat_list_domains` | Inspect installed public snapshots and their dates |
+| `faostat_list_codes` | Discover native agricultural area/item/element codes |
+| `faostat_get_data` | Query annual food, crop and fertiliser snapshots |
 
 ## Data Sources
 
-All data comes from public official statistical APIs. We attribute data to its source agency (Federal Reserve, BLS, BEA, IMF, OECD, Eurostat, BIS, EIA, World Bank, ECB). Queries fetch from the source or reuse a cached source response.
+Data comes from official statistical APIs and public data releases. Queries
+fetch from the provider, reuse a cached source response or query an explicitly
+dated FAOSTAT snapshot. Results retain provider attribution, units and source
+URLs. The server's MIT licence does not replace the providers' data-use terms.
 
 ## License
 

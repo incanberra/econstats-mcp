@@ -2,6 +2,7 @@ import {mkdir} from 'node:fs/promises';
 import {join} from 'node:path';
 import {atomicWrite,readStored,storageDirectory,storagePath,withFileLock} from './storage';
 import {stable,type DataResult,type DataSeries,type DataObservation} from './result';
+import {MemoryCacheBackend} from './cache';
 
 type Snapshot={retrievedAt:string;definition:Record<string,unknown>;observations:DataObservation[];urls:string[]};
 type Change={kind:string;period?:string;before:unknown;after:unknown};
@@ -12,18 +13,20 @@ const comparableObservation=(o:DataObservation)=>({...o,attributes:Object.fromEn
 
 /** Observation snapshots from this installation, never a reconstructed release-vintage archive. */
 export class RevisionTracker {
-  private memory=new Map<string,RecordState>();
   private queue:Promise<unknown>=Promise.resolve();
-  constructor(private directory:string|undefined=process.env.ECONSTATS_REVISION_DIR||(storageDirectory()?join(storageDirectory()!,'revisions-v1'):undefined),private retain=50) {
+  constructor(private directory:string|undefined=process.env.ECONSTATS_REVISION_DIR||(storageDirectory()?join(storageDirectory()!,'revisions-v1'):undefined),private retain=50,private memory=new MemoryCacheBackend(256,16*1024*1024)) {
     if(!Number.isInteger(retain)||retain<2||retain>200)throw new Error('Retain 2-200 revision vintages.');
   }
   private async state<T>(id:string,work:(state:RecordState|undefined)=>Promise<{state?:RecordState;value:T}>):Promise<T>{
     if(!/^[a-f0-9]{64}$/.test(id))throw new Error('Use a series_id returned by a data tool.');
     const apply=async()=>{
       const file=this.directory?storagePath(this.directory,id):undefined;
-      const current=file?await readStored(file,true):this.memory.get(id);
+      const current=file?await readStored(file,true):await this.memory.get(id);
       if(current&&(current.version!==1||current.id!==id||!Array.isArray(current.history)||!current.observations||!Number.isFinite(Date.parse(current.lastCheckedAt))))throw new Error('Revision history is corrupt; it was not overwritten.');
-      const next=await work(current);if(next.state){if(file)await atomicWrite(file,next.state);else this.memory.set(id,next.state);}return next.value;
+      const next=await work(current);if(next.state){if(file)await atomicWrite(file,next.state);else{
+        await this.memory.set(id,next.state,30*86400);
+        if(await this.memory.get(id)===null)throw new Error('Revision snapshot exceeds the memory budget.');
+      }}return next.value;
     };
     const run=async()=>{if(!this.directory)return apply();await mkdir(this.directory,{recursive:true});return withFileLock(storagePath(this.directory,id),apply);};
     const pending=this.queue.then(run,run);this.queue=pending.catch(()=>{});return pending;
@@ -52,9 +55,10 @@ export class RevisionTracker {
         // Retain only observations present in retained snapshots; query-window omissions are not deletions.
         current.observations=Object.fromEntries(current.history.filter(v=>stable(v.definition)===stable(def)).flatMap(v=>v.observations.map(o=>[o.period,o])));
         return {state:current,value:{status:!old?'baseline':changes.length?'changes_detected':'unchanged',storage:this.directory?'persistent':'memory',seriesId:series.id,changes,retainedVintages:current.history.length,droppedVintages:current.droppedVintages}};
-      });}catch{series.revision={status:'unavailable',changes:[],message:'Revision storage could not be read or written; data retrieval succeeded, but no tracking claim is made.'};}
+      });}catch{series.revision={status:'unavailable',changes:[],message:'Revision storage is unavailable or exceeds its memory budget; data retrieval succeeded, but no tracking claim is made.'};}
     }
     r.notes.push('Revision history records snapshots retrieved by this installation. Cached replays create no vintage; absent periods in narrower queries are not deletions. New observations are distinct from revisions. Older publication vintages are not reconstructed.');
+    if(!this.directory)r.notes.push('In-memory revision history is bounded and may evict older series; it is not a durable archive.');
     return r;
   }
   async history(id:string,limit=10){

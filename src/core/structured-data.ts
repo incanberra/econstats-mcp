@@ -1,9 +1,15 @@
-import {parse} from 'csv-parse/sync';
+import {periodBoundary} from './selection-periods';
+import {parseSdmxCsv} from './sdmx-csv';
+export {parseSdmxCsv} from './sdmx-csv';
+import {getOecdDefinition} from './oecd-metadata';
+import {parseOecdJob} from './oecd-parse-client';
+import {phase} from './request-context';
+import {oecdStages} from './oecd-stage';
 import {type LayeredCache} from './cache';
 import {checkedJson,worldBankPages,worldBankUrl,formatWorldBank,ecbUrl,formatEcb} from './legacy';
 import {fetchRetry} from './http';
 import {buildImfDataUrl,formatImfCsv} from './imf';
-import {buildOecdDataUrl,buildOecdStructureUrl,requestOecd,formatOecdCsv} from './oecd';
+import {buildOecdDataUrl,requestOecd} from './oecd';
 import {buildBisDataUrl,buildBisStructureUrl,getBisDefinition,validateBisKey,formatBisCsv,requestBis} from './bis';
 import {buildEurostatDataUrl,buildEurostatStructureUrl,validateEurostatFilters,formatEurostatJson,requestEurostat} from './eurostat';
 import {buildEiaDataUrl,buildEiaMetadataUrl,validateEiaSelection,formatEiaData,requestEia} from './eia';
@@ -13,6 +19,8 @@ import type {Provider} from './access';
 import type {Retrieval} from './selection';
 import {fetchComtradeData,validateComtradeData,type ComtradeDataParams} from './comtrade';
 import {AccessError} from './access';
+import {fetchPortwatch,validatePortwatch} from './portwatch';
+import {fetchFaostat,validateFaostat} from './faostat';
 
 export type Keys={FRED_KEY?:string;BLS_KEY?:string;BEA_KEY?:string;EIA_KEY?:string;COMTRADE_KEY?:string};
 function requireKey(key:string|undefined,provider:string):asserts key is string {if(!key)throw new Error(`${provider} API key is not configured.`);}
@@ -21,27 +29,6 @@ function applyMetadata(s:DataSeries){
   const a={...s.dimensions,...s.attributes};s.frequency=a.FREQ??a.FREQUENCY??a.freq??s.frequency;
   s.unit=a.UNIT_MEASURE??a.UNIT??a.unit??s.unit;s.unitMultiplier=multiplier(a);
   s.adjustment=a.S_ADJUSTMENT??a.ADJUSTMENT??a.s_adj??a.SEASONAL_ADJUSTMENT??s.adjustment;
-}
-export function parseSdmxCsv(source:Provider,csv:string,url:URL,query:Record<string,unknown>,def:SdmxDefinition,key:string,retrievedAt:string,limit=36):DataResult {
-  const header=parse(csv,{bom:true,to:1})[0] as string[];
-  if(!header?.includes('TIME_PERIOD')||!header.includes('OBS_VALUE')||new Set(header).size!==header.length||!def.dimensions.every(d=>header.includes(d.id)))throw new Error('Invalid SDMX observation columns.');
-  const rows=parse(csv,{columns:true,bom:true,skip_empty_lines:true}) as Record<string,string>[];
-  const dims=def.dimensions.map(d=>d.id),selected=key.split('.').map(k=>k.split('+'));
-  const attrs=header.filter(k=>/^[A-Z][A-Z0-9_]*$/.test(k)&&!dims.includes(k)&&!['TIME_PERIOD','OBS_VALUE','DATAFLOW','STRUCTURE','STRUCTURE_ID','ACTION'].includes(k));
-  const groups=new Map<string,DataSeries>();
-  for(const r of rows){
-    if(dims.some((d,i)=>!selected[i]?.includes(r[d])))throw new Error('Provider returned an unrequested SDMX series.');
-    if(r.DATAFLOW&&r.DATAFLOW!==`${def.agency}:${def.id}(${def.version})`)throw new Error('Provider returned a different SDMX dataflow/version.');
-    const id=dims.map(d=>r[d]).join('.');
-    if(!groups.has(id))groups.set(id,dataSeries(`${def.agency}:${def.id}(${def.version})`,attributes(r,dims),url,{labels:Object.fromEntries(def.dimensions.map(d=>[d.id,d.codes.find(c=>c.code===r[d.id])?.label??r[d.id]])),notes:[def.label,...def.notes]}));
-    groups.get(id)!.observations.push(observation(r.TIME_PERIOD,r.OBS_VALUE,attributes(r,attrs)));
-  }
-  for(const s of groups.values()){
-    const a=s.observations[0]?.attributes??{};
-    for(const k of ['UNIT','UNIT_MEASURE','UNIT_MULT','BASE_PER','BASE_PERIOD'])if(new Set(s.observations.map(o=>o.attributes[k]??'')).size>1)throw new Error(`Inconsistent ${k} within series.`);
-    s.attributes=Object.fromEntries(attrs.filter(k=>!k.startsWith('OBS_')&&a[k]!==undefined&&s.observations.every(o=>o.attributes[k]===a[k])).map(k=>[k,a[k]]));applyMetadata(s);
-  }
-  return finishResult(source,query,[...groups.values()],retrievedAt,limit,['Native provider units and transformations retained; no definition was inferred from the requested tool name.']);
 }
 export function parseFredData(info:any,data:any,a:any,url:URL,retrievedAt:string):DataResult {
   const meta=info.seriess?.[0];if(info.seriess?.length!==1||meta?.id!==a.series_id||!Array.isArray(data.observations)||data.units!==(a.units??'lin'))throw new Error('Missing or unexpected FRED metadata/observations/transformation.');
@@ -125,6 +112,12 @@ export function parseEcbData(data:any,url:URL,p:any,retrievedAt:string):DataResu
 
 export async function fetchStructured(r:Retrieval,keys:Keys,cache:LayeredCache,fresh=false):Promise<DataResult>{
   const a=r.arguments;
+  if(r.tool==='portwatch_get_data'){
+    validatePortwatch(a as any);return cache.getOrCompute(`public:portwatch:v1:${JSON.stringify(a)}`,3600,()=>fetchPortwatch(cache,a as any),fresh);
+  }
+  if(r.tool==='faostat_get_data'){
+    validateFaostat(a as any);return cache.getOrCompute(`public:faostat:v1:${JSON.stringify(a)}`,3600,async()=>fetchFaostat(a as any),fresh);
+  }
   if(r.tool==='comtrade_get_data'){
     const params=a as ComtradeDataParams;validateComtradeData(params);
     if(params.access_mode==='authenticated'&&!keys.COMTRADE_KEY)throw new AccessError('COMTRADE','missing_key','Set COMTRADE_API_KEY locally, or explicitly choose preview.');
@@ -141,6 +134,9 @@ export async function fetchStructured(r:Retrieval,keys:Keys,cache:LayeredCache,f
       requireKey(keys.FRED_KEY,'FRED');if(!/^[A-Za-z0-9_]{1,100}$/.test(a.series_id)||!Number.isInteger(a.limit??36)||(a.limit??36)<1||(a.limit??36)>5000||!['lin','pc1','pch','ch1','chg'].includes(a.units??'lin'))throw new Error('Invalid FRED parameters.');
       const url=(endpoint:string)=>{const u=new URL(`https://api.stlouisfed.org/fred/${endpoint}`);u.search=new URLSearchParams({series_id:a.series_id,file_type:'json',api_key:keys.FRED_KEY!}).toString();return u;};
       const obs=url('series/observations');obs.searchParams.set('units',a.units??'lin');obs.searchParams.set('limit',String(a.limit??36));obs.searchParams.set('sort_order','desc');
+      if(a.start_period){if(!/^\d{4}-\d{2}-\d{2}$/.test(a.start_period))throw new Error('FRED start_period must be YYYY-MM-DD.');obs.searchParams.set('observation_start',periodBoundary(a.start_period));}
+      if(a.end_period){if(!/^\d{4}-\d{2}-\d{2}$/.test(a.end_period))throw new Error('FRED end_period must be YYYY-MM-DD.');obs.searchParams.set('observation_end',periodBoundary(a.end_period));}
+      if(a.start_period&&a.end_period&&a.start_period>a.end_period)throw new Error('FRED start_period must not follow end_period.');
       const [info,data]=await Promise.all([checkedJson(url('series')),checkedJson(obs)]);return parseFredData(info,data,a,new URL(`https://fred.stlouisfed.org/series/${a.series_id}`),new Date().toISOString());
     }
     if(r.tool==='bls_get_series'){
@@ -159,13 +155,24 @@ export async function fetchStructured(r:Retrieval,keys:Keys,cache:LayeredCache,f
     }
     if(r.tool==='imf_get_data'||r.tool==='oecd_get_data'){
       const oecd=r.tool==='oecd_get_data',p={datasetId:a.dataset_id,databaseId:a.database_id,space:a.space,version:a.version,seriesKey:a.series_key,countryCodes:a.country_codes,indicator:a.indicator,frequency:a.frequency,startPeriod:a.start_period,endPeriod:a.end_period,limit:a.limit};
-      const url=oecd?buildOecdDataUrl(p):buildImfDataUrl(p),flow=url.pathname.split('/data/')[1].split('/')[0].split(','),key=url.pathname.split('/').at(-1)!;
-      const su=oecd?buildOecdStructureUrl(a.dataset_id,a.version,a.space):new URL(`https://api.imf.org/external/sdmx/2.1/dataflow/${flow[0]}/${flow[1]}/latest?references=all`);
-      const xml=await cache.getOrCompute(`structured:definition:v1:${su}`,86400,async()=>oecd?requestOecd(su,true):(await(await fetchRetry(su,{headers:{Accept:'application/vnd.sdmx.structure+xml;version=2.1'}})).text()));
+      if(oecd){
+        buildOecdDataUrl(p); // Reject unbounded/invalid selections before metadata I/O.
+        const def=await getOecdDefinition(cache,a.dataset_id,a.version,a.space);validateSdmxKey(def,p.seriesKey);
+        const url=buildOecdDataUrl({...p,version:def.version});
+        return oecdStages.run(async()=>{
+          const csv=await phase('oecd.data.download',()=>requestOecd(url));
+          const retrievedAt=new Date().toISOString();
+          return phase('oecd.data.parse',()=>parseOecdJob<DataResult>({kind:'data',csv,definition:def,url:String(url),
+            query:a,key:p.seriesKey,limit:a.limit??36,retrievedAt}));
+        });
+      }
+      const url=buildImfDataUrl(p),flow=url.pathname.split('/data/')[1].split('/')[0].split(','),key=url.pathname.split('/').at(-1)!;
+      const su=new URL(`https://api.imf.org/external/sdmx/2.1/dataflow/${flow[0]}/${flow[1]}/latest?references=all`);
+      const xml=await cache.getOrCompute(`structured:definition:v1:${su}`,86400,async()=>(await(await fetchRetry(su,{headers:{Accept:'application/vnd.sdmx.structure+xml;version=2.1'}})).text()));
       const def=sdmxDefinition(xml,flow[1],flow[0],a.version);validateSdmxKey(def,key);
-      const csv=oecd?await requestOecd(url):await(await fetchRetry(url,{headers:{Accept:'application/vnd.sdmx.data+csv;version=2.0.0'}})).text();
-      if(oecd)formatOecdCsv(csv,url,a.limit);else formatImfCsv(csv,url,a.limit);
-      return parseSdmxCsv(oecd?'OECD':'IMF',csv,url,a,def,key,new Date().toISOString(),a.limit??36);
+      const csv=await(await fetchRetry(url,{headers:{Accept:'application/vnd.sdmx.data+csv;version=2.0.0'}})).text();
+      formatImfCsv(csv,url,a.limit);
+      return parseSdmxCsv('IMF',csv,url,a,def,key,new Date().toISOString(),a.limit??36);
     }
     if(r.tool==='bis_get_data'){
       const p={datasetId:a.dataset_id,version:a.version,seriesKey:a.series_key,startPeriod:a.start_period,endPeriod:a.end_period,limit:a.limit};buildBisDataUrl(p);

@@ -1,9 +1,10 @@
+import {rankCatalogue} from './catalogue-search';
 import { createLayeredCache, type LayeredCache } from "./cache";
 import {checkedJson,legacyFailure,worldBankPages,worldBankUrl,formatWorldBank,ecbUrl,formatEcb} from "./legacy";
 import {AccessError,accessGovernor,type Provider} from "./access";
 import {connectionHealth} from "./health";
 import { buildImfDataUrl, fetchImfData, fetchImfDatasets, fetchImfStructure, type ImfDataParams } from "./imf";
-import { buildOecdCatalogUrl, buildOecdDataUrl, buildOecdStructureUrl, formatOecdCsv, formatOecdDatasets, formatOecdStructure, requestOecd, type OecdDataParams, type OecdSpace } from "./oecd";
+import { buildOecdCatalogUrl, buildOecdDataUrl, buildOecdStructureUrl, formatOecdCsv, parseOecdCatalogue, formatOecdCatalogue, formatOecdStructure, requestOecd, type OecdDataParams, type OecdSpace } from "./oecd";
 import { EUROSTAT_CATALOG_URL, buildEurostatDataUrl, buildEurostatStructureUrl, formatEurostatDatasets, formatEurostatStructure, formatEurostatJson, validateEurostatFilters, requestEurostat, type EurostatDataParams } from "./eurostat";
 import { BIS_CATALOG_URL, buildBisDataUrl, buildBisStructureUrl, formatBisDatasets, formatBisStructure, getBisDefinition, validateBisKey, formatBisCsv, requestBis, type BisDataParams } from "./bis";
 import {selectionEvidence,eiaObservationResponse} from "./selection-data";
@@ -11,10 +12,16 @@ import {selectSource, type SelectionParams} from "./selection";
 import {buildEiaMetadataUrl,buildEiaDataUrl,validateEiaMetadata,validateEiaSelection,formatEiaRoutes,formatEiaMetadata,formatEiaFacets,formatEiaData,requestEia,type EiaDataParams} from "./eia";
 import {fetchStructured} from './structured-data';
 import {RevisionTracker} from './revisions';
+import {getOecdDefinition} from './oecd-metadata';
+import {formatOecdDefinition} from './oecd';
+import {phase} from './request-context';
 import {ABS_CATALOG_URL,absCatalogue,absStructure,buildAbsStructureUrl,requestAbs,sdmxDefinition} from './abs';
 import {dataSeries,finishResult} from './result';
 import type {Retrieval} from './selection';
 import {comtradeReferences,comtradeProducts,comtradeAvailability,type ComtradeReference,type ComtradeClassification,type ComtradeSelection} from './comtrade';
+import {portwatchLocations,portwatchMetadata,type PortwatchDataset} from './portwatch';
+import {faostatDomains,faostatCodes} from './faostat';
+import type {FaostatDomain} from './faostat-catalog';
 
 type FredUnits = "lin" | "pc1" | "pch" | "ch1" | "chg";
 
@@ -98,16 +105,23 @@ export class EconStatsCoreClient {
   }
 
   async selectSource(params: SelectionParams): Promise<string> {
-    return JSON.stringify(await selectSource(params,{FRED:!!this.env.FRED_KEY,BEA:!!this.env.BEA_KEY,EIA:!!this.env.EIA_KEY},async r=>{
-      const e=await selectionEvidence(r,this.env,this.cache);
+    return JSON.stringify(await selectSource(params,{FRED:!!this.env.FRED_KEY,BEA:!!this.env.BEA_KEY,EIA:!!this.env.EIA_KEY,COMTRADE:!!this.env.COMTRADE_KEY},async r=>{
+      const e=await selectionEvidence(r,this.env,this.cache,{startPeriod:params.startPeriod,endPeriod:params.endPeriod});
       const s=dataSeries(`verified:${e.measure}`,{...e.dimensions,country:e.country},e.urls[0],{frequency:e.frequency,unit:e.unit,unitMultiplier:e.unitMultiplier,adjustment:e.adjustment,transformation:e.transformation,urls:e.urls,notes:e.notes,observations:e.observations.map(o=>({...o,attributes:o.attributes??{}}))});
       const tracked=await this.revisions.track(finishResult(e.source,{},[s],e.retrievedAt,120));
       return {...e,revision:tracked.series[0].revision};
     }),null,2);
   }
 
-  async getStructuredData(request:Retrieval,fresh=false){return this.revisions.track(await fetchStructured(request,this.env,this.cache,fresh));}
+  async getStructuredData(request:Retrieval,fresh=false){
+    const result=await fetchStructured(request,this.env,this.cache,fresh);
+    return phase('result.revisions',()=>this.revisions.track(result));
+  }
   async revisionHistory(seriesId:string,limit=10){return this.revisions.history(seriesId,limit);}
+  async portwatchListLocations(dataset:PortwatchDataset,query?:string,country?:string,offset=0,limit=30){return portwatchLocations(this.cache,dataset,query,country,offset,limit);}
+  async portwatchGetMetadata(dataset:PortwatchDataset){return portwatchMetadata(this.cache,dataset);}
+  async faostatListDomains(){return faostatDomains();}
+  async faostatListCodes(domain:FaostatDomain,dimension:'area'|'item'|'element',query?:string,offset=0,limit=30){return faostatCodes(domain,dimension,query,offset,limit);}
   async comtradeReferences(reference:ComtradeReference,query?:string,offset=0,limit=50){return comtradeReferences(this.cache,reference,query,offset,limit);}
   async comtradeProducts(classification:ComtradeClassification,query?:string,offset=0,limit=50){return comtradeProducts(this.cache,classification,query,offset,limit);}
   async comtradeAvailability(params:ComtradeSelection,fresh=false){return comtradeAvailability(this.cache,params,this.env.COMTRADE_KEY,fresh);}
@@ -389,7 +403,7 @@ export class EconStatsCoreClient {
 
   async imfListDatasets(query?: string): Promise<string> {
     try {
-      return await this.cache.getOrCompute(`imf:catalog:v1:${query ?? ""}`, TTL.imfData, () => fetchImfDatasets(query));
+      return await this.cache.getOrCompute(`imf:catalog:v2:${query ?? ""}`, TTL.imfData, () => fetchImfDatasets(query));
     } catch (error) {
       return `IMF error: ${error instanceof Error ? error.message : "Request failed"}`;
     }
@@ -406,14 +420,12 @@ export class EconStatsCoreClient {
 
   async oecdListDatasets(query?: string, offset = 0, limit = 20, space?: OecdSpace): Promise<string> {
     try {
-      // Cache the catalogue once; different searches share the same upstream download.
+      // Share both the download and parsing across concurrent searches. Caching
+      // raw XML caused every search to reparse the full catalogue on the HTTP loop.
       const url = buildOecdCatalogUrl(space);
-      const xml = await this.cache.getOrCompute(`oecd:catalog:v2:${url}`, TTL.oecdMetadata, async () => {
-        const text = await requestOecd(url, true);
-        formatOecdDatasets(text, "", 0, 20, space); // Reject malformed responses before caching.
-        return text;
-      });
-      return formatOecdDatasets(xml, query, offset, limit, space);
+      const catalogue = await this.cache.getOrCompute(`oecd:catalog-index:v3:${url}`, TTL.oecdMetadata,
+        async () => parseOecdCatalogue(await requestOecd(url, true)));
+      return formatOecdCatalogue(catalogue, query, offset, limit, space);
     } catch (error) {
       return `OECD error: ${error instanceof Error ? error.message : "Request failed"}`;
     }
@@ -421,13 +433,7 @@ export class EconStatsCoreClient {
 
   async oecdGetStructure(datasetId: string, version?: string, dimensionId?: string, query?: string, space?: OecdSpace): Promise<string> {
     try {
-      const url = buildOecdStructureUrl(datasetId, version, space);
-      const xml = await this.cache.getOrCompute(`oecd:structure:v1:${url}`, TTL.oecdMetadata, async () => {
-        const text = await requestOecd(url, true);
-        formatOecdStructure(text, datasetId, version, undefined, "", space);
-        return text;
-      });
-      return formatOecdStructure(xml, datasetId, version, dimensionId, query, space);
+      return formatOecdDefinition(await getOecdDefinition(this.cache,datasetId,version,space),datasetId,dimensionId,query,space);
     } catch (error) {
       return `OECD error: ${error instanceof Error ? error.message : "Request failed"}`;
     }
@@ -580,10 +586,7 @@ export class EconStatsCoreClient {
     return this.legacyCall("WORLD_BANK",async()=>{
       const url=new URL("https://api.worldbank.org/v2/indicator?format=json&source=2&per_page=1000");
       const catalogue=await this.cache.getOrCompute("worldbank:catalog:v3",TTL.worldBankSearch,()=>worldBankPages(url));
-      const terms=query.toLowerCase().split(/\s+/).filter(Boolean);
-      const matches=catalogue.rows.filter((r:any)=>terms.every(t=>`${r.id} ${r.name} ${r.sourceNote??""}`.toLowerCase().includes(t)));
-      const score=(r:any)=>(String(r.name).toLowerCase().replace(/[^a-z0-9]+/g," ").trim()===terms.join(" ")?1000:0)+terms.reduce((s,t)=>s+(`${r.id} ${r.name}`.toLowerCase().includes(t)?10:0),0);
-      matches.sort((a:any,b:any)=>score(b)-score(a)||a.id.localeCompare(b.id));
+      const matches=rankCatalogue(catalogue.rows,query,(r:any)=>({id:r.id,name:r.name,description:r.sourceNote}));
       return `${matches.slice(0,30).map((r:any)=>`${r.id}: ${r.name}`).join("\n")||"No matching WDI indicators."}\nShowing ${Math.min(30,matches.length)} of ${matches.length} matches across the complete downloaded WDI catalogue (${catalogue.pages} pages).\nSource: ${url}\nCatalogue updated: ${catalogue.updated}`;
     });
   }

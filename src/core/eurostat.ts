@@ -1,3 +1,4 @@
+import {rankCatalogue} from './catalogue-search';
 import { parse } from "csv-parse/sync";
 import {providerFetch} from "./access";
 import { XMLParser } from "fast-xml-parser";
@@ -65,15 +66,11 @@ export function formatEurostatDatasets(tsv: string, query = "", offset = 0, limi
   if (!Number.isInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 50) throw new Error("Invalid catalogue pagination.");
   const rows = parse(tsv,{delimiter:"\t",columns:true,bom:true,skip_empty_lines:true}) as Record<string,string>[];
   if (!rows.length || !["title","code","type","data end"].every(c=>c in rows[0])) throw new Error("Unexpected Eurostat catalogue response.");
-  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
-  const synonyms: Record<string,string[]> = {inflation:["inflation","hicp","consumer price"],gdp:["gdp","gross domestic product"]};
   const unique = new Map<string,Record<string,string>>();
   for (const row of rows) {
-    if (!["dataset","table"].includes(row.type) || !/^[a-z][a-z0-9_]{1,100}$/i.test(row.code)) continue;
-    const text = `${row.code} ${row.title}`.toLowerCase();
-    if (terms.every(t=>(synonyms[t]??[t]).some(word=>text.includes(word)))) unique.set(row.code,row);
+    if (["dataset","table"].includes(row.type) && /^[a-z][a-z0-9_]{1,100}$/i.test(row.code)) unique.set(row.code,row);
   }
-  const matches = [...unique.values()].sort((a,b)=>(b["data end"]??"").localeCompare(a["data end"]??""));
+  const matches = rankCatalogue([...unique.values()],query,r=>({id:r.code,name:r.title,coverageEnd:r["data end"]}));
   const found = matches.slice(offset,offset+limit);
   return `${found.map(r=>`${r.code}: ${r.title.trim()} | coverage ${r["data start"]} to ${r["data end"]} | data updated ${r["last update of data"]}`).join("\n") || "No matching Eurostat datasets on this page."}\nShowing ${found.length} of ${matches.length} matches (offset ${offset}). Use offset to continue. Inspect eurostat_get_structure before querying.\nSource: ${EUROSTAT_CATALOG_URL}`;
 }

@@ -1,3 +1,4 @@
+import {rankCatalogue} from './catalogue-search';
 import { parse } from "csv-parse/sync";
 import {providerFetch} from "./access";
 import { XMLParser } from "fast-xml-parser";
@@ -61,9 +62,7 @@ function structures(xml: string): any {
 }
 export function formatBisDatasets(xml: string, query = "", offset = 0, limit = 20): string {
   if (!Number.isInteger(offset)||offset<0||!Number.isInteger(limit)||limit<1||limit>50) throw new Error("Invalid BIS catalogue pagination.");
-  const synonyms: Record<string,string[]> = {inflation:["consumer price","inflation","cpi"],housing:["property","housing"],forex:["exchange rate"],banking:["banking"]};
-  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
-  const flows = list(structures(xml).Dataflows?.Dataflow).filter(f=>f.agencyID==="BIS" && /^WS_[A-Z0-9_]+$/.test(f.id) && terms.every(t=>(synonyms[t]??[t]).some(word=>`${f.id} ${english(f)} ${english(f,"Description")}`.toLowerCase().includes(word))));
+  const flows=rankCatalogue(list(structures(xml).Dataflows?.Dataflow).filter(f=>f.agencyID==='BIS'&&/^WS_[A-Z0-9_]+$/.test(f.id)),query,f=>({id:f.id,name:english(f),description:english(f,'Description')}));
   const rows = flows.slice(offset,offset+limit).map(f=>`${f.id} (version ${f.version}): ${english(f)}`);
   return `${rows.join("\n") || "No matching BIS datasets on this page."}\nShowing ${rows.length} of ${flows.length} matches (offset ${offset}). Inspect bis_get_structure before constructing a key.\nSource: ${BIS_CATALOG_URL}`;
 }

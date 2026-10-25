@@ -1,6 +1,9 @@
+import {rankCatalogue} from './catalogue-search';
 import { parse } from "csv-parse/sync";
-import {providerFetch} from "./access";
-import { XMLParser } from "fast-xml-parser";
+import {providerFetch, AccessError, accessGovernor} from "./access";
+import { XMLParser, XMLValidator } from "fast-xml-parser";
+import {checkCancelled,requestSignal} from './request-context';
+import type {SdmxDefinition} from './abs';
 
 export const OECD_SPACES = ["public", "sti-public"] as const;
 export type OecdSpace = typeof OECD_SPACES[number];
@@ -12,7 +15,8 @@ export function resolveOecdSpace(datasetId?: string, space?: OecdSpace): OecdSpa
 }
 function baseUrl(space: OecdSpace): string { return `https://sdmx.oecd.org/${space}/rest`; }
 export function buildOecdCatalogUrl(space?: OecdSpace): URL {
-  return new URL(`${baseUrl(resolveOecdSpace(undefined, space))}/dataflow/all/all/latest?references=none`);
+  // Discovery only needs identifiers and names, not full annotations/descriptions.
+  return new URL(`${baseUrl(resolveOecdSpace(undefined, space))}/dataflow/all/all/latest?references=none&detail=allstubs`);
 }
 export const OECD_CATALOG_URL = String(buildOecdCatalogUrl());
 export interface OecdDataParams {
@@ -84,24 +88,33 @@ function structures(xml: string): any {
   return result;
 }
 
-export function formatOecdDatasets(xml: string, query = "", offset = 0, limit = 20, space?: OecdSpace): string {
+export type OecdDataset = { agency: string; id: string; version: string; name: string };
+
+export function parseOecdCatalogue(xml: string): OecdDataset[] {
+  if (/<!DOCTYPE|<!ENTITY/i.test(xml)) throw new Error("Unexpected XML document type in OECD response.");
+  if (XMLValidator.validate(xml) !== true) throw new Error("Unexpected OECD catalogue response: incomplete or invalid XML.");
+  const dataflows = structures(xml).Dataflows;
+  if (!dataflows) throw new Error("Unexpected OECD catalogue response: dataflows are missing.");
+  return list(dataflows.Dataflow).map(flow => {
+    const name = english(flow);
+    if (![flow.agencyID, flow.id, flow.version, name].every(value => typeof value === "string" && value.length > 0)) {
+      throw new Error("OECD catalogue contains an incomplete dataset definition.");
+    }
+    return { agency: flow.agencyID, id: flow.id, version: flow.version, name };
+  });
+}
+
+export function formatOecdCatalogue(catalogue: OecdDataset[], query = "", offset = 0, limit = 20, space?: OecdSpace): string {
   const catalogUrl = buildOecdCatalogUrl(space);
   if (!Number.isInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 50) throw new Error("Invalid catalogue pagination: offset >= 0, limit 1–50.");
-  const synonyms: Record<string,string[]> = { inflation:["inflation","consumer price","cpi","hicp"], gdp:["gdp","gross domestic product","national accounts"] };
-  const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
-  const flows = list(structures(xml).Dataflows?.Dataflow).filter(f => terms.every(t => {
-    const text = `${f.agencyID},${f.id} ${english(f)}`.toLowerCase();
-    return (synonyms[t] ?? [t]).some(word => text.includes(word));
-  })).sort((a,b) => {
-    const relevance = (f: any) => {
-      const title = english(f).toLowerCase();
-      return (terms.includes("inflation") && /consumer price|hicp|inflation rate/.test(title) ? 10 : 0) +
-        (terms.includes("gdp") && /national accounts|gross domestic product/.test(title) ? 10 : 0);
-    };
-    return relevance(b)-relevance(a);
-  });
-  const rows = flows.slice(offset, offset+limit).map(f => `${f.agencyID},${f.id} (version ${f.version}): ${english(f)} [space=${resolveOecdSpace(`${f.agencyID},${f.id}`, space)}]`);
+  const flows = rankCatalogue(catalogue, query, f=>({id:`${f.agency},${f.id}`,name:f.name}));
+  const rows = flows.slice(offset, offset+limit).map(f => `${f.agency},${f.id} (version ${f.version}): ${f.name} [space=${resolveOecdSpace(`${f.agency},${f.id}`, space)}]`);
   return `${rows.join("\n") || "No matching OECD datasets on this page."}\nShowing ${rows.length} of ${flows.length} matches (offset ${offset}). Use offset to continue. Inspect oecd_get_structure before constructing a series_key. TiVA requires explicit start_period and end_period.\nSource: ${catalogUrl}`;
+}
+
+// Compatibility entry point for callers that already have an XML response.
+export function formatOecdDatasets(xml: string, query = "", offset = 0, limit = 20, space?: OecdSpace): string {
+  return formatOecdCatalogue(parseOecdCatalogue(xml), query, offset, limit, space);
 }
 
 export function formatOecdStructure(xml: string, datasetId: string, version?: string, dimensionId?: string, query = "", space?: OecdSpace): string {
@@ -127,6 +140,17 @@ export function formatOecdStructure(xml: string, datasetId: string, version?: st
   });
   const resolvedSpace = resolveOecdSpace(datasetId, space);
   return `Dataset ${datasetId} (version ${flow.version}): ${english(flow)}\nSpace: ${resolvedSpace}\nseries_key dimension order: ${dimensions.map(x=>x.id).join(".")}\nCodes in the structure are not a guarantee of available observations. Choose exact units, adjustment, methodology and transformation; do not equate national CPI, CPIH and HICP.${resolvedSpace === "sti-public" || d.id.startsWith("DSD_TIVA_") ? " TiVA requests require both start_period and end_period; latest-observation parameters are blocked by OECD." : ""}\n\n${details.join("\n\n")}\n\nSource: ${buildOecdStructureUrl(datasetId,version,space)}`;
+}
+
+/** Render only a compact validated definition; no XML parsing on a cache hit. */
+export function formatOecdDefinition(def:SdmxDefinition,datasetId:string,dimensionId?:string,query='',space?:OecdSpace):string{
+  if(dimensionId&&!def.dimensions.some(d=>d.id===dimensionId))throw new Error(`Unknown dimension ${dimensionId}. Available: ${def.dimensions.map(d=>d.id).join(', ')}`);
+  const terms=query.toLowerCase().split(/\s+/).filter(Boolean),resolved=resolveOecdSpace(datasetId,space);
+  const details=def.dimensions.filter(d=>!dimensionId||d.id===dimensionId).map(d=>{
+    const codes=d.codes.filter(c=>terms.every(t=>`${c.code} ${c.label}`.toLowerCase().includes(t))),count=dimensionId?60:5;
+    return `${d.id}: ${codes.slice(0,count).map(c=>`${c.code}=${c.label}`).join('; ')}\nShowing ${Math.min(count,codes.length)} of ${codes.length} codes.`;
+  });
+  return `Dataset ${datasetId} (version ${def.version}): ${def.label}\nSpace: ${resolved}\nseries_key dimension order: ${def.dimensions.map(d=>d.id).join('.')}\nCodes in the structure are not a guarantee of available observations. Choose exact units, adjustment, methodology and transformation; do not equate national CPI, CPIH and HICP.${resolved==='sti-public'?' TiVA requests require both start_period and end_period; latest-observation parameters are blocked by OECD.':''}\n\n${details.join('\n\n')}\n\nSource: ${buildOecdStructureUrl(datasetId,def.version,space)}`;
 }
 
 export function formatOecdCsv(csv: string, url: URL, limit = 36): string {
@@ -162,13 +186,49 @@ export function formatOecdCsv(csv: string, url: URL, limit = 36): string {
   return `${output || "No numeric OECD observations for this selection."}\n${missing ? `${missing} missing observations omitted; missing values are not zero.\n` : ""}\nSource: Organisation for Economic Co-operation and Development (OECD)\nURL: ${url}\nRetrieved: ${new Date().toISOString()}\nValues retain reported units and UNIT_MULT (power of ten), base periods, adjustment, transformation and observation-status flags. Cite the exact series, units, observation date and source URL. Do not infer definitions from the measure name alone.`;
 }
 
-export async function requestOecd(url: string | URL, metadata = false): Promise<string> {
-  const res = await providerFetch(url,{headers:{Accept:metadata ? "application/vnd.sdmx.structure+xml;version=2.1" : "text/csv"},signal:AbortSignal.timeout(30000)});
+function readChunk(reader: ReadableStreamDefaultReader<Uint8Array>, signal: AbortSignal) {
+  return new Promise<Awaited<ReturnType<typeof reader.read>>>((resolve, reject) => {
+    if (signal.aborted) { reject(signal.reason); return; }
+    const abort = () => reject(signal.reason);
+    signal.addEventListener("abort", abort, { once: true });
+    reader.read().then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+  });
+}
+
+export async function requestOecd(url: string | URL, metadata = false, timeoutMs = 30000): Promise<string> {
+  const parent=requestSignal();
+  const signal = AbortSignal.any([AbortSignal.timeout(timeoutMs),...(parent?[parent]:[])]);
+  const res = await providerFetch(url,{headers:{Accept:metadata ? "application/vnd.sdmx.structure+xml;version=2.1" : "text/csv"},signal});
   if (res.status === 429) throw new Error(`OECD rate limit reached (60 downloads/hour). Retry later${res.headers.get("Retry-After") ? `; Retry-After: ${res.headers.get("Retry-After")}` : ""}.`);
   if (res.status === 413) throw new Error("OECD rejected the query size or lastNObservations parameter. Specify start_period and end_period and narrow the series_key.");
   if (res.status === 404) throw new Error("OECD dataset/selection not found. Recheck discovery, version and series dimensions.");
   if (!res.ok) throw new Error(`OECD API HTTP ${res.status}. No data returned.`);
-  const text = await res.text();
-  if (text.length > 20_000_000) throw new Error("OECD response exceeds 20 MB. Narrow the selection and period range.");
-  return text;
+  const reader = res.body?.getReader();
+  const maxBytes = 20_000_000;
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    if (Number(res.headers.get("content-length")) > maxBytes) {
+      throw new AccessError("OECD", "invalid_response", "Response exceeds 20 MB. Narrow the selection and period range.");
+    }
+    if (!reader) throw new AccessError("OECD", "invalid_response", "Empty response body.");
+    while (true) {
+      const { done, value } = await readChunk(reader, signal);
+      if (done) break;
+      size += value.byteLength;
+      if (size > maxBytes) throw new AccessError("OECD", "invalid_response", "Response exceeds 20 MB. Narrow the selection and period range.");
+      chunks.push(value);
+    }
+    const expected=res.headers.get('content-length'),encoding=res.headers.get('content-encoding');
+    if(expected!==null&&(!encoding||encoding==='identity')&&Number(expected)!==size)
+      throw new AccessError('OECD','invalid_response','Response length does not match its header; no data were returned.');
+    return Buffer.concat(chunks, size).toString("utf8");
+  } catch (error) {
+    // Cancellation must not itself prolong a timed-out tool call.
+    void reader?.cancel().catch(() => {});
+    checkCancelled();
+    const failure = error instanceof AccessError ? error : new AccessError("OECD", "unavailable", "Response body failed or timed out; no data returned.");
+    await accessGovernor().record("OECD", failure.kind).catch(() => {});
+    throw failure;
+  }
 }

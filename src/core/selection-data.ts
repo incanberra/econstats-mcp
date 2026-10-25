@@ -1,3 +1,4 @@
+import {periodBoundary} from './selection-periods';
 import {parse} from 'csv-parse/sync';
 import iso from 'i18n-iso-countries';
 import {type LayeredCache} from './cache';
@@ -217,18 +218,20 @@ export function parseAbsEvidence(data:DataResult,def:SdmxDefinition):SeriesEvide
   return e;
 }
 
-export async function selectionEvidence(r:Retrieval,keys:Keys,cache:LayeredCache):Promise<SeriesEvidence> {
-  const a=r.arguments,cacheKey=`selection:evidence:v2:${JSON.stringify(r)}`;
+export async function selectionEvidence(r:Retrieval,keys:Keys,cache:LayeredCache,range:{startPeriod?:string;endPeriod?:string}={}):Promise<SeriesEvidence> {
+  const a=r.arguments,cacheKey=`selection:evidence:v3:${JSON.stringify([r,range])}`;
   return cache.getOrCompute(cacheKey,r.tool==='fred_get_series'?900:3600,async()=>{
     let e:SeriesEvidence;
     if(r.tool==='abs_get_data'){
-      const p={datasetId:a.dataset_id,seriesKey:a.series_key,limit:a.limit},su=buildAbsStructureUrl(p.datasetId);
+      const p={datasetId:a.dataset_id,seriesKey:a.series_key,startPeriod:a.start_period,endPeriod:a.end_period,limit:a.limit},su=buildAbsStructureUrl(p.datasetId);
       const xml=await cache.getOrCompute(`abs:structure:v1:${su}`,86400,()=>requestAbs(su)),def=sdmxDefinition(xml,p.datasetId,'ABS');validateSdmxKey(def,p.seriesKey);
       const url=buildAbsDataUrl({...p,version:def.version});e=parseAbsEvidence(parseAbsCsv(await requestAbs(url),url,p,def,new Date().toISOString()),def);
     }else if(r.tool==='fred_get_series'){
       check(keys.FRED_KEY,'missing_key','FRED API key is not configured.');
       const url=(endpoint:string)=>new URL(`https://api.stlouisfed.org/fred/${endpoint}?series_id=${encodeURIComponent(a.series_id)}&file_type=json&api_key=${encodeURIComponent(keys.FRED_KEY!)}`);
       const obs=url('series/observations');obs.searchParams.set('units',a.units);obs.searchParams.set('limit',String(a.limit));obs.searchParams.set('sort_order','desc');
+      if(a.start_period)obs.searchParams.set('observation_start',a.start_period);
+      if(a.end_period)obs.searchParams.set('observation_end',a.end_period);
       const [info,data]=await Promise.all([checkedJson(url('series')),checkedJson(obs)]);e=parseFredEvidence(info,data,a);
     }else if(r.tool==='bls_get_series'){
       const body={seriesid:a.series_ids,startyear:a.start_year,endyear:a.end_year,calculations:true,catalog:true,...(keys.BLS_KEY?{registrationkey:keys.BLS_KEY}:{})};
@@ -238,22 +241,22 @@ export async function selectionEvidence(r:Retrieval,keys:Keys,cache:LayeredCache
       const url=new URL('https://apps.bea.gov/api/data/');url.search=new URLSearchParams({method:'GetData',DataSetName:a.dataset,TableName:a.table_name,Frequency:a.frequency,Year:a.year,ResultFormat:'JSON'}).toString();
       const auth=new URL(url);auth.searchParams.set('UserID',keys.BEA_KEY!);e=parseBeaEvidence(await checkedJson(auth),a,url);
     }else if(r.tool==='oecd_get_data'||r.tool==='imf_get_data'){
-      const oecd=r.tool==='oecd_get_data',p={datasetId:a.dataset_id,databaseId:a.database_id,seriesKey:a.series_key,limit:a.limit};
+      const oecd=r.tool==='oecd_get_data',p={datasetId:a.dataset_id,databaseId:a.database_id,seriesKey:a.series_key,startPeriod:a.start_period,endPeriod:a.end_period,limit:a.limit};
       const url=oecd?buildOecdDataUrl(p):buildImfDataUrl(p);
       const csv=oecd?await requestOecd(url):await(await fetchRetry(url,{headers:{Accept:'application/vnd.sdmx.data+csv;version=2.0.0'}})).text();
       e=parseCpiCsv(oecd?'OECD':'IMF',csv,a.series_key,url);
     }else if(r.tool==='bis_get_data'){
       const structureUrl=buildBisStructureUrl(a.dataset_id);
       const xml=await cache.getOrCompute(`bis:structure:v1:${structureUrl}`,7*86400,async()=>{const xml=await requestBis(structureUrl);getBisDefinition(xml,a.dataset_id);return xml;});
-      const def=getBisDefinition(xml,a.dataset_id),p={datasetId:a.dataset_id,seriesKey:a.series_key,limit:a.limit,version:def.version};
+      const def=getBisDefinition(xml,a.dataset_id),p={datasetId:a.dataset_id,seriesKey:a.series_key,startPeriod:a.start_period,endPeriod:a.end_period,limit:a.limit,version:def.version};
       validateBisKey(def,p.seriesKey);const url=buildBisDataUrl(p);e=parseBisEvidence(await requestBis(url),url,p,def);
     }else if(r.tool==='eurostat_get_data'){
-      const p={datasetId:a.dataset_id,filters:a.filters,limit:a.limit},su=buildEurostatStructureUrl(p.datasetId);
+      const p={datasetId:a.dataset_id,filters:a.filters,startPeriod:a.start_period,endPeriod:a.end_period,limit:a.limit},su=buildEurostatStructureUrl(p.datasetId);
       const xml=await cache.getOrCompute(`eurostat:structure:v1:${su}`,86400,()=>requestEurostat(su));validateEurostatFilters(xml,p);
       const url=buildEurostatDataUrl(p);e=parseEurostatEvidence(JSON.parse(await requestEurostat(url)),url,p);
     }else if(r.tool==='eia_get_data'){
       check(keys.EIA_KEY,'missing_key','EIA API key is not configured.');
-      const p={route:a.route,frequency:a.frequency,fields:a.data_fields,facets:a.facets,length:a.length},mu=buildEiaMetadataUrl(p.route);
+      const p={route:a.route,frequency:a.frequency,fields:a.data_fields,facets:a.facets,startPeriod:a.start_period,endPeriod:a.end_period,length:a.length},mu=buildEiaMetadataUrl(p.route);
       const meta=await cache.getOrCompute(`eia:metadata:v1:${mu}`,86400,()=>requestEia(mu,keys.EIA_KEY));validateEiaSelection(meta,p);
       const url=buildEiaDataUrl(p),response=await eiaObservationResponse(cache,url,p,meta,keys.EIA_KEY);e=parseEiaEvidence(response.data,url,p,meta);e.retrievedAt=response.retrievedAt;
     }else if(r.tool==='worldbank_get_data'){
@@ -262,9 +265,10 @@ export async function selectionEvidence(r:Retrieval,keys:Keys,cache:LayeredCache
       const meta=await cache.getOrCompute(`worldbank:definition:v3:${mu}`,7*86400,async()=>{const result=await worldBankPages(mu),d=result.rows.find((r:any)=>r.id===p.indicator);check(d,'definition_unconfirmed','WDI indicator metadata is missing.');return d;});
       e=parseWorldBankEvidence(await worldBankPages(url),meta,url,p);
     }else if(r.tool==='ecb_get_data'){
-      const url=ecbUrl({flowRef:a.flow_ref,key:a.key,startPeriod:a.start_period});e=parseEcbEvidence(await checkedJson(url,{headers:{Accept:'application/json'}}),url);
+      const url=ecbUrl({flowRef:a.flow_ref,key:a.key,startPeriod:a.start_period,endPeriod:a.end_period});e=parseEcbEvidence(await checkedJson(url,{headers:{Accept:'application/json'}}),url);
     }else throw new Error('No structured evidence adapter for this tool.');
     check(e.observations.length,'no_data','Provider returned no numeric observations for the requested transformation.');
-    return finishEvidence(e,a.limit??a.length??120);
+    const canonical=finishEvidence(e,10000),start=range.startPeriod??a.start_period,end=range.endPeriod??a.end_period;
+    return finishEvidence({...canonical,observations:canonical.observations.filter(o=>(!start||periodBoundary(o.period,true)>=periodBoundary(start))&&(!end||periodBoundary(o.period)<=periodBoundary(end,true)))},a.limit??a.length??120);
   });
 }

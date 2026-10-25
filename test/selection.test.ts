@@ -25,7 +25,7 @@ describe('source-selection policy',()=>{
   expect(rankSources({...p,frequency:'monthly'},{BEA:true}).candidates).toEqual([]);
  });
  test('GDP growth conventions remain distinct',()=>{
-  expect(rankSources({...base,measure:'real_gdp_growth_qoq',countries:['US']}).candidates).toEqual([]);
+  expect(rankSources({...base,measure:'real_gdp_growth_qoq',countries:['US']}).candidates.every(c=>c.discovery&&c.requests.length===0)).toBe(true);
   expect(rankSources({...base,measure:'real_gdp_growth_annualized',countries:['US']},{BEA:true}).candidates[0].requests[0].arguments.table_name).toBe('T10101');
  });
  test('uses the current Eurostat total-age code with a specific unemployment definition',()=>{
@@ -85,8 +85,8 @@ describe('structured verification',()=>{
  test('verification off makes no calls and cannot claim verified data',async()=>{
   const r=await selectSource({...base,verify:false},{},async()=>{throw new Error('Must not fetch');},now);expect(r.status).toBe('unverified_recommendation');expect(r.selected.verification.status).toBe('unverified');
  });
- test('latest verified common period takes precedence over suitability score',async()=>{
-  const r=await selectSource(base,{},async q=>{const e=await probe(q);if(e.source==='OECD')e.observations[1].period='2026-06';return e;},now);expect(r.selected.source).toBe('IMF');
+ test('latest purpose ranks common-period freshness ahead of suitability',async()=>{
+  const r=await selectSource({...base,purpose:'latest'},{},async q=>{const e=await probe(q);if(e.source==='OECD')e.observations[1].period='2026-06';return e;},now);expect(r.selected.source).toBe('IMF');
  });
  test('formatted text, NaN, future dates and conflicting duplicate values cannot verify',async()=>{
   for(const fn of [async()=>('2026-07: 2\n2026-08: 3' as any),async(q:any)=>({...await probe(q),observations:[{period:'2026-07',value:NaN}]}),async(q:any)=>({...await probe(q),observations:[{period:'2027-01',value:1},{period:'2027-02',value:2}]}),async(q:any)=>({...await probe(q),observations:[{period:'2026-07',value:1},{period:'2026-07',value:2}]})]){
