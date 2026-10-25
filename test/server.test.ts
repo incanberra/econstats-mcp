@@ -22,6 +22,16 @@ test('SDK delivers methodology instructions and exposes valid public data schema
       expect((schema.properties!.space as any).enum).toEqual(['public','sti-public']);
       expect(schema.required??[]).not.toContain('space');
     }
+    const selector=tools.find(t=>t.name==='select_source')!;
+    for(const key of ['start_period','end_period','partner_countries','product_query','product_codes','industry_query','location_query'])expect(selector.inputSchema.properties).toHaveProperty(key);
+    expect((selector.inputSchema.properties!.preferred_source as any).enum).toContain('COMTRADE');
+    expect((selector.inputSchema.properties!.measure as any).enum).toContain('foreign_value_added_in_final_demand');
+    expect((selector.inputSchema.properties!.observations as any).default).toBeUndefined();
+    const plan=await c.callTool({name:'select_source',arguments:{measure:'foreign_value_added_in_final_demand',countries:['AU'],partner_countries:['CN'],start_period:'2000',end_period:'2022',industry_query:'manufacturing'}});
+    expect(plan.isError).not.toBe(true);expect(JSON.stringify(plan.content)).toContain('discovery_required');expect(JSON.stringify(plan.content)).toContain('sti-public');
+    const shipping=await c.callTool({name:'select_source',arguments:{measure:'chokepoint_capacity',countries:[],location_query:'Suez',start_period:'2025-01-01',end_period:'2025-12-31'}});
+    expect(shipping.isError).not.toBe(true);expect(JSON.stringify(shipping.content)).toContain('PORTWATCH');
+    const fred=tools.find(t=>t.name==='fred_get_series')!;expect(fred.inputSchema.properties).toHaveProperty('start_period');
     const tiva=await c.callTool({name:'oecd_get_data',arguments:{dataset_id:'OECD.STI.PIE,DSD_TIVA_MAINSH@DF_MAINSH',series_key:'AUS.A'}});
     expect(tiva.isError).toBe(true);expect(JSON.stringify(tiva.content)).toContain('requires both start_period and end_period');
     expect(tools.find(t=>t.name==='comtrade_get_data')!.inputSchema.required).toContain('reporter_code');

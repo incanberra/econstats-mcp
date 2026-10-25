@@ -1,3 +1,4 @@
+import {periodBoundary} from './selection-periods';
 import {parseSdmxCsv} from './sdmx-csv';
 export {parseSdmxCsv} from './sdmx-csv';
 import {getOecdDefinition} from './oecd-metadata';
@@ -133,6 +134,9 @@ export async function fetchStructured(r:Retrieval,keys:Keys,cache:LayeredCache,f
       requireKey(keys.FRED_KEY,'FRED');if(!/^[A-Za-z0-9_]{1,100}$/.test(a.series_id)||!Number.isInteger(a.limit??36)||(a.limit??36)<1||(a.limit??36)>5000||!['lin','pc1','pch','ch1','chg'].includes(a.units??'lin'))throw new Error('Invalid FRED parameters.');
       const url=(endpoint:string)=>{const u=new URL(`https://api.stlouisfed.org/fred/${endpoint}`);u.search=new URLSearchParams({series_id:a.series_id,file_type:'json',api_key:keys.FRED_KEY!}).toString();return u;};
       const obs=url('series/observations');obs.searchParams.set('units',a.units??'lin');obs.searchParams.set('limit',String(a.limit??36));obs.searchParams.set('sort_order','desc');
+      if(a.start_period){if(!/^\d{4}-\d{2}-\d{2}$/.test(a.start_period))throw new Error('FRED start_period must be YYYY-MM-DD.');obs.searchParams.set('observation_start',periodBoundary(a.start_period));}
+      if(a.end_period){if(!/^\d{4}-\d{2}-\d{2}$/.test(a.end_period))throw new Error('FRED end_period must be YYYY-MM-DD.');obs.searchParams.set('observation_end',periodBoundary(a.end_period));}
+      if(a.start_period&&a.end_period&&a.start_period>a.end_period)throw new Error('FRED start_period must not follow end_period.');
       const [info,data]=await Promise.all([checkedJson(url('series')),checkedJson(obs)]);return parseFredData(info,data,a,new URL(`https://fred.stlouisfed.org/series/${a.series_id}`),new Date().toISOString());
     }
     if(r.tool==='bls_get_series'){

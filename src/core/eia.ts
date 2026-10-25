@@ -1,3 +1,4 @@
+import {rankCatalogue} from './catalogue-search';
 import {providerFetch,AccessError} from "./access";
 const BASE="https://api.eia.gov/v2/";
 export interface EiaDataParams {route:string;frequency:string;fields:string[];facets:Record<string,string[]>;startPeriod?:string;endPeriod?:string;length?:number;offset?:number}
@@ -57,8 +58,7 @@ export function validateEiaSelection(meta:any,p:EiaDataParams):void{
 }
 export function formatEiaRoutes(meta:any,route:string,query="",offset=0,limit=20):string{
   validateEiaMetadata(meta);
-  const terms=query.toLowerCase().split(/\s+/).filter(Boolean);
-  const matches=(meta.routes??[]).filter((r:any)=>terms.every(t=>`${r.id} ${r.name} ${r.description}`.toLowerCase().includes(t)));
+  const matches=rankCatalogue(meta.routes??[],query,(r:any)=>({id:r.id,name:r.name,description:r.description}));
   const rows=matches.slice(offset,offset+limit).map((r:any)=>`${route?eiaRoute(route)+"/":""}${r.id}: ${r.name} — ${r.description??""}`);
   return `${rows.join("\n")||"No matching child routes; inspect this route's metadata for data fields."}\nShowing ${rows.length} of ${matches.length} child routes (offset ${offset}). Search is within this node, not the entire catalogue.\nSource: ${buildEiaMetadataUrl(route)} (API key omitted)`;
 }

@@ -1,9 +1,11 @@
 import iso from "i18n-iso-countries";
+import {DISCOVERY_MEASURES,discoveryCandidates} from './selection-discovery';
+import {selectionPeriod,periodBoundary,requestedPeriods,dateRetrieval} from './selection-periods';
 import {AccessError} from "./access";
 import {type SeriesEvidence,finishEvidence,comparisonSignature,expectedAdjustment,expectedTransformation,VerificationError,requireEvidence as check} from "./evidence";
 
-export const SOURCES = ["FRED","BLS","BEA","IMF","OECD","EUROSTAT","BIS","ECB","WORLD_BANK","EIA","ABS"] as const;
-export const MEASURES = ["headline_cpi_yoy","core_cpi_yoy","hicp_yoy","cpih_yoy","real_gdp_level","real_gdp_growth_qoq","real_gdp_growth_annualized","unemployment_rate","nonfarm_jobs_change","private_credit_gdp","credit_gap","private_debt_service","crossborder_bank_claims","real_house_prices","nominal_house_prices","real_effective_exchange_rate","nominal_effective_exchange_rate","usd_exchange_rate","policy_rate","ecb_deposit_rate","population","gdp_per_capita_ppp","electricity_price","electricity_sales","wti_spot_price","gasoline_price","natural_gas_spot_price","residential_electricity_price","residential_electricity_sales","regular_gasoline_price","henry_hub_spot_price"] as const;
+export const SOURCES = ["FRED","BLS","BEA","IMF","OECD","EUROSTAT","BIS","ECB","WORLD_BANK","EIA","ABS","COMTRADE","FAOSTAT","PORTWATCH"] as const;
+export const MEASURES = ["headline_cpi_yoy","core_cpi_yoy","hicp_yoy","cpih_yoy","real_gdp_level","real_gdp_growth_qoq","real_gdp_growth_annualized","unemployment_rate","nonfarm_jobs_change","private_credit_gdp","credit_gap","private_debt_service","crossborder_bank_claims","real_house_prices","nominal_house_prices","real_effective_exchange_rate","nominal_effective_exchange_rate","usd_exchange_rate","policy_rate","ecb_deposit_rate","population","gdp_per_capita_ppp","electricity_price","electricity_sales","wti_spot_price","gasoline_price","natural_gas_spot_price","residential_electricity_price","residential_electricity_sales","regular_gasoline_price","henry_hub_spot_price",...DISCOVERY_MEASURES] as const;
 export type Source = typeof SOURCES[number];
 export type Measure = typeof MEASURES[number];
 export interface SelectionParams {
@@ -15,30 +17,63 @@ export interface SelectionParams {
   observations?: number;
   verify?: boolean;
   maxAgeDays?: number;
+  startPeriod?:string;
+  endPeriod?:string;
+  partnerCountries?:string[];
+  productQuery?:string;
+  productCodes?:string[];
+  classification?:'H0'|'H1'|'H2'|'H3'|'H4'|'H5'|'H6';
+  industryQuery?:string;
+  locationQuery?:string;
+  locationType?:'ports'|'chokepoints';
 }
 export interface Retrieval {tool:string;arguments:Record<string,any>}
 export interface Candidate {
   source:Source;score:number;definition:string;reason:string;notes:string[];
   metadata?:Retrieval;requests:Retrieval[];countryTags?:string[];
   frequency:string;ready:boolean;
+  discovery?:Retrieval[];requirements?:string[];
 }
 const european = new Set("AUT BEL BGR HRV CYP CZE DNK EST FIN FRA DEU GRC HUN IRL ITA LVA LTU LUX MLT NLD POL PRT ROU SVK SVN ESP SWE ISL NOR CHE".split(" "));
 export function normaliseSelection(params: SelectionParams) {
   if (!MEASURES.includes(params.measure)) throw new Error("Unsupported measure. Select an exact measure from the tool schema; do not infer CPIH/HICP or growth conventions.");
-  if (!Array.isArray(params.countries)||!params.countries.length||params.countries.length>5) throw new Error("Specify 1–5 countries using ISO2/ISO3 codes, or EA for the euro area.");
+  const shipping=/^port_|^chokepoint_|^vessel_/.test(params.measure);
+  if (!Array.isArray(params.countries)||(!shipping&&!params.countries.length)||params.countries.length>5) throw new Error("Specify 1–5 countries using ISO2/ISO3 codes, or EA for the euro area.");
   const countries = [...new Set(params.countries.map(code=>{
     const c=code.toUpperCase();if(c==="EA")return c;
     const result=c.length===2 ? iso.alpha2ToAlpha3(c) : iso.isValid(c) ? c : undefined;
     if(!result)throw new Error(`Unknown country code ${code}. Use ISO codes, e.g. US/USA, GB/GBR.`);
     return result;
   }))];
-  const n=params.observations??12;
+  let n=params.observations??12;
   if(!Number.isInteger(n)||n<1||n>120)throw new Error("observations must be 1–120 per country.");
   if(params.maxAgeDays!==undefined&&(!Number.isInteger(params.maxAgeDays)||params.maxAgeDays<0))throw new Error("max_age_days must be a nonnegative integer.");
   if(params.preferredSource&&!SOURCES.includes(params.preferredSource))throw new Error("Unknown preferred source.");
   if(params.frequency&&!["daily","weekly","monthly","quarterly","annual"].includes(params.frequency))throw new Error("Unknown frequency.");
-  const defaultFrequency=/gdp_growth|gdp_level|credit|debt_service|bank_claims|house_prices/.test(params.measure)?"quarterly":/population|capita/.test(params.measure)?"annual":params.measure==="ecb_deposit_rate"?"daily":"monthly";
-  return {...params,countries,observations:n,frequency:params.frequency??defaultFrequency,purpose:params.purpose??(countries.length>1?"comparison":"latest"),verify:params.verify??true};
+  if(params.purpose&&!['latest','comparison','release'].includes(params.purpose))throw new Error('Unknown purpose.');
+  const defaultFrequency=shipping?'daily':/merchandise|value_added|agricultural|food_supply|fertiliser/.test(params.measure)?'annual':/gdp_growth|gdp_level|credit|debt_service|bank_claims|house_prices/.test(params.measure)?'quarterly':/population|capita/.test(params.measure)?'annual':params.measure==='ecb_deposit_rate'?'daily':'monthly';
+  const frequency=params.frequency??defaultFrequency;
+  const startPeriod=selectionPeriod(params.startPeriod,frequency),endPeriod=selectionPeriod(params.endPeriod,frequency,true);
+  if(startPeriod&&endPeriod&&periodBoundary(startPeriod)>periodBoundary(endPeriod,true))throw new Error('start_period must not be after end_period.');
+  const discoveryOnly=(DISCOVERY_MEASURES as readonly string[]).includes(params.measure);
+  if(discoveryOnly&&!(shipping?frequency==='daily':params.measure.startsWith('merchandise_')?['annual','monthly'].includes(frequency):frequency==='annual'))throw new Error('This measure does not support the requested frequency: shipping is daily, merchandise trade monthly/annual, TiVA and agriculture annual.');
+  if(discoveryOnly&&countries.includes('EA'))throw new Error('Use explicit national country codes for trade, TiVA, agriculture and shipping.');
+  const requiredPeriods=!discoveryOnly&&params.observations===undefined?requestedPeriods(startPeriod,endPeriod,frequency):undefined;
+  if(requiredPeriods)n=requiredPeriods.length;
+  if(params.partnerCountries&&(!Array.isArray(params.partnerCountries)||params.partnerCountries.length<1||params.partnerCountries.length>5))throw new Error('Specify 1–5 partner countries.');
+  const partnerCountries=params.partnerCountries?.map(c=>{const upper=c.toUpperCase();if(upper==='WLD')return upper;const code=upper.length===2?iso.alpha2ToAlpha3(upper):iso.isValid(upper)?upper:undefined;if(!code)throw new Error('Unknown partner country.');return code;});
+  for(const value of [params.productQuery,params.industryQuery,params.locationQuery])if(value!==undefined&&(typeof value!=='string'||!value.trim()||value.length>200))throw new Error('Discovery filters must contain 1–200 characters.');
+  if(params.classification&&!/^H[0-6]$/.test(params.classification))throw new Error('Pin an HS edition H0–H6.');
+  if(params.productCodes&&(!params.productCodes.length||params.productCodes.length>10||params.productCodes.some(c=>!/^(TOTAL|\d{2}|\d{4}|\d{6})$/.test(c))))throw new Error('Use 1–10 exact HS product codes.');
+  if(params.locationType&&!['ports','chokepoints'].includes(params.locationType))throw new Error('Unknown location type.');
+  if(params.locationType==='chokepoints'&&/^port_/.test(params.measure)||params.locationType==='ports'&&params.measure==='chokepoint_capacity')throw new Error('Location type conflicts with the requested measure.');
+  if((params.partnerCountries||params.productCodes||params.productQuery||params.classification||params.industryQuery||params.locationQuery||params.locationType)&&!discoveryOnly)throw new Error('These dimension filters apply to trade, TiVA, agriculture or shipping measures.');
+  if((params.productCodes||params.classification)&&!params.measure.startsWith('merchandise_'))throw new Error('HS codes and editions apply only to merchandise trade.');
+  if(params.industryQuery&&!params.measure.includes('value_added'))throw new Error('Industry filters apply to TiVA measures.');
+  if((params.locationQuery||params.locationType)&&!shipping)throw new Error('Location filters apply to shipping measures.');
+  if(params.partnerCountries&&!/merchandise|value_added/.test(params.measure))throw new Error('Partner filters apply to trade and TiVA measures.');
+  if(params.productQuery&&!/merchandise|agricultural|food_supply|fertiliser/.test(params.measure))throw new Error('Product filters apply to merchandise trade and agriculture.');
+  return {...params,countries,partnerCountries,startPeriod,endPeriod,requiredPeriods,observations:n,frequency,purpose:params.purpose??(countries.length>1?'comparison':'latest'),verify:params.verify??true};
 }
 export function rankSources(input: SelectionParams, configured: Partial<Record<Source,boolean>> = {}) {
   const p=normaliseSelection(input),candidates:Candidate[]=[];
@@ -49,7 +84,7 @@ export function rankSources(input: SelectionParams, configured: Partial<Record<S
   const limit=p.countries.length>1?Math.min(120,p.observations+12):p.observations;
   const add=(source:Source,score:number,definition:string,reason:string,requests:Retrieval[],metadata?:Retrieval,notes:string[]=[],countryTags?:string[])=>{
     const ready=!["FRED","BEA","EIA"].includes(source)||!!configured[source];
-    candidates.push({source,score:score+(p.preferredSource===source?1000:0),definition,reason,requests,metadata,notes:[...notes,...(!ready?[`${source} API key is not configured.`]:[])],frequency:p.frequency,ready,countryTags});
+    candidates.push({source,score,definition,reason,requests,metadata,notes:[...notes,...(!ready?[`${source} API key is not configured.`]:[])],frequency:p.frequency,ready,countryTags});
   };
   const fred=(id:string,units="lin",score=90,definition:string)=>add("FRED",score,definition,"Convenient US series redistributed from its producer.",[{tool:"fred_get_series",arguments:{series_id:id,units,limit:p.observations}}],undefined,["Cite the underlying producer and transformation; FRED is a redistribution service."]);
   const bls=(id:string,definition:string)=>add("BLS",p.purpose==="release"?120:105,definition,"Original producer of US labour/CPI statistics.",[{tool:"bls_get_series",arguments:{series_ids:[id],start_year:String(new Date().getUTCFullYear()-Math.ceil(p.observations/12)-1),end_year:String(new Date().getUTCFullYear())}}],undefined,["BLS API observations can lag its release pages; check the returned dates."]);
@@ -104,6 +139,8 @@ export function rankSources(input: SelectionParams, configured: Partial<Record<S
     const indicator=p.measure==="population"?"SP.POP.TOTL":"NY.GDP.PCAP.PP.KD";
     add("WORLD_BANK",110,p.measure==="population"?"Total population, persons.":"GDP per capita, PPP in constant international dollars; inspect current reference year.","World Bank is suited to long-run annual development comparisons.",p.countries.map(c=>({tool:"worldbank_get_data",arguments:{country_codes:[c],indicator,start_year:new Date().getUTCFullYear()-p.observations-3,end_year:new Date().getUTCFullYear()}})),undefined,["Annual data can lag; PPP reference years can change between revisions."]);
   }
+  candidates.push(...discoveryCandidates(p,configured,!candidates.length&&/real_gdp/.test(p.measure)&&allowed('quarterly','annual')));
+  for(const candidate of candidates)candidate.requests=candidate.requests.map(r=>dateRetrieval(r,p.startPeriod,p.endPeriod,p.observations));
   return {request:p,candidates:candidates.sort((a,b)=>b.score-a.score)};
 }
 function ageDays(period:string,now:Date):number{
@@ -119,10 +156,12 @@ export async function selectSource(params:SelectionParams,configured:Partial<Rec
   const results=await Promise.all(ranked.candidates.map(async c=>{
     const result:any={...c,verification:{status:p.verify?"not_checked":"unverified",countries:[],commonPeriods:[]}};
     if(!c.ready){result.verification={...result.verification,status:"missing_key",message:`${c.source} API key is not configured.`};return result;}
+    if(c.discovery){result.verification={...result.verification,status:'discovery_required',message:'Source routing only. Execute discovery steps, resolve exact dimensions and verify observations.'};return result;}
     if(!p.verify)return result;
     try{
       const series=await Promise.all(c.requests.map(async(r,i)=>{
-        const e=finishEvidence(await probe(r),p.countries.length>1?Math.min(120,p.observations+12):p.observations);
+        const raw=finishEvidence(await probe(r),10000);
+        const e=finishEvidence({...raw,observations:raw.observations.filter(o=>(!p.startPeriod||o.period>=p.startPeriod)&&(!p.endPeriod||o.period<=p.endPeriod))},p.countries.length>1?Math.min(120,p.observations+12):p.observations);
         check(e.source===c.source&&e.measure===p.measure,"definition_mismatch","Returned provider or measure does not match the request.");
         check(e.country===p.countries[i],"country_mismatch","Returned country does not match the request.");
         check(e.frequency===p.frequency,"frequency_mismatch","Returned frequency does not match the request.");
@@ -142,24 +181,30 @@ export async function selectSource(params:SelectionParams,configured:Partial<Rec
       check(new Set(series.map(comparisonSignature)).size===1,"incomparable_definitions","Countries have different units, scales, adjustment or transformations; no automatic conversion was applied.");
       const common=(series[0]?.observations.map(o=>o.period).filter(d=>series.every(e=>e.observations.some(o=>o.period===d)))??[]).slice(-p.observations);
       const latest=common.at(-1),age=latest?ageDays(latest,now):null;
-      const status=series.some(e=>!e.observations.length)?"no_data":common.length<p.observations?"partial_coverage":p.maxAgeDays!==undefined&&age!==null&&age>p.maxAgeDays?"stale":"verified";
+      const missingPeriods=p.requiredPeriods?.filter(period=>!common.includes(period))??[];
+      const status=series.some(e=>!e.observations.length)?"no_data":common.length<p.observations||missingPeriods.length?"partial_coverage":p.maxAgeDays!==undefined&&age!==null&&age>p.maxAgeDays?"stale":"verified";
       const countries=series.map(e=>({country:e.country,periods:e.observations.map(o=>o.period),latest:e.observations.at(-1)?.period??null,observations:e.observations.length,urls:e.urls,retrievedAt:e.retrievedAt,
         definition:{measure:e.measure,frequency:e.frequency,unit:e.unit,unitMultiplier:e.unitMultiplier,adjustment:e.adjustment,transformation:e.transformation,dimensions:e.dimensions},
         alignedObservations:e.observations.filter(o=>common.includes(o.period)),notes:e.notes,revision:e.revision}));
-      result.verification={status,message:status==='verified'?"Structured provider records confirm definition and overlapping observations.":status==='partial_coverage'?`Only ${common.length} common observations; ${p.observations} requested.`:status==='stale'?`Latest common observation is ${age} days old, exceeding the requested threshold.`:"No numeric observations for one or more countries.",countries,commonPeriods:common,latestCommonPeriod:latest??null,ageDays:age,checkedAt:now.toISOString(),checks:{country:true,measure:true,frequency:true,unitsAndScale:true,adjustment:series.every(e=>e.adjustment!=='not_reported')?'confirmed':'not_reported_for_registered_measure',transformation:true,commonCoverage:common.length>=p.observations}};
+      result.verification={status,message:status==='verified'?"Structured provider records confirm definition and overlapping observations.":status==='partial_coverage'?`Only ${common.length} common observations; ${p.observations} requested.`:status==='stale'?`Latest common observation is ${age} days old, exceeding the requested threshold.`:"No numeric observations for one or more countries.",countries,commonPeriods:common,missingPeriods,requestedRange:{start:p.startPeriod??null,end:p.endPeriod??null},latestCommonPeriod:latest??null,ageDays:age,checkedAt:now.toISOString(),checks:{country:true,measure:true,frequency:true,unitsAndScale:true,adjustment:series.every(e=>e.adjustment!=='not_reported')?'confirmed':'not_reported_for_registered_measure',transformation:true,commonCoverage:common.length>=p.observations&&!missingPeriods.length}};
     }catch(error){
       const status=error instanceof VerificationError?error.reason:error instanceof AccessError?error.kind:"lookup_failed";
       result.verification={status,message:error instanceof VerificationError||error instanceof AccessError?error.message:"Could not validate the provider response. No data or definition were inferred.",countries:[],commonPeriods:[]};
     }
     return result;
   }));
-  const eligible=results.filter(r=>r.verification.status==="verified").sort((a,b)=>String(b.verification.latestCommonPeriod).localeCompare(String(a.verification.latestCommonPeriod))||b.score-a.score);
+  const freshness=(a:any,b:any)=>String(b.verification.latestCommonPeriod??'').localeCompare(String(a.verification.latestCommonPeriod??''));
+  const eligible=results.filter(r=>r.verification.status==='verified').sort((a,b)=>p.purpose==='latest'?freshness(a,b)||b.score-a.score:b.score-a.score||freshness(a,b));
   let selected=preferred?eligible.find(r=>r.source===preferred):eligible[0];
-  if(!p.verify)selected=preferred?results.find(r=>r.source===preferred&&r.ready):results.find(r=>r.ready);
-  const decision=selected?(p.verify?`Definition checks passed for every country, with ${selected.verification.commonPeriods.length} common observations through ${selected.verification.latestCommonPeriod}. ${preferred?"The explicit source preference was honored.":"Among valid candidates, the latest common period takes priority, followed by source suitability."}`:"Recommendation uses the registry only; provider data were not verified."):preferred?`No verified ${preferred} match for this exact request. Alternatives are shown; your preference was not overridden.`:"No candidate meets the requested definition, frequency, country and observation coverage. Review the rejection reasons before refining the request.";
-  return {status:selected?(p.verify?"verified_recommendation":"unverified_recommendation"):preferred?"requested_source_not_verified":"no_verified_match",request:p,selected:selected??null,candidates:results,
+  if(!p.verify)selected=preferred?results.find(r=>r.source===preferred&&r.ready&&!r.discovery):results.find(r=>r.ready&&!r.discovery);
+  const suggested=results.find(r=>r.discovery&&(!preferred||r.source===preferred));
+  const rankingPolicy=p.purpose==='latest'?'Latest common observation first, then source suitability.':p.purpose==='comparison'?'Comparable definitions and requested coverage are required; source suitability first, then freshness.':'Original-producer suitability first among valid candidates, then freshness. API observations may lag release pages.';
+  const decision=selected?(p.verify?`Definition checks passed for every country, with ${selected.verification.commonPeriods.length} common observations through ${selected.verification.latestCommonPeriod}. ${preferred?"The explicit source preference was honored.":rankingPolicy}`:"Recommendation uses the registry only; provider data were not verified."):suggested?`Dataset discovery is required for ${suggested.source}; no observations or exact dataset have been verified.`:preferred?`No verified ${preferred} match for this exact request. Alternatives are shown; your preference was not overridden.`:"No candidate meets the requested definition, frequency, country and observation coverage. Review the rejection reasons before refining the request.";
+  return {status:selected?(p.verify?"verified_recommendation":"unverified_recommendation"):suggested&&suggested.ready?"discovery_required":preferred?"requested_source_not_verified":suggested?"source_unavailable":"no_verified_match",request:p,selected:selected??null,candidates:results,
+    recommendedSource:selected?.source??suggested?.source??null,rankingPolicy,
     explanation:selected?`Selected ${selected.source}: ${decision} ${selected.reason}`:decision,
-    alignmentInstruction:"Use verification.countries[].alignedObservations for the verified comparison and cite each country's URLs and observation periods. Re-fetching may return a newer revision; repeat verification if combining newly retrieved data.",
-    discovery:ranked.candidates.length?[]:[{tool:/capita|population/.test(p.measure)?"worldbank_search":/gdp|cpih|unemployment/.test(p.measure)?"oecd_list_datasets":/energy|electricity|gas|oil|spot/.test(p.measure)?"eia_list_routes":"bis_list_datasets",arguments:{query:p.measure.replaceAll("_"," ")}}],
+    alignmentInstruction:"For verified_recommendation only: use verification.countries[].alignedObservations for the verified comparison and cite each country's URLs and observation periods. Re-fetching may return a newer revision; repeat verification if combining newly retrieved data.",
+    requirements:suggested?.requirements??[],
+    discovery:suggested?.discovery??(ranked.candidates.length?[]:[{tool:/capita|population/.test(p.measure)?"worldbank_search":/gdp|cpih|unemployment/.test(p.measure)?"oecd_list_datasets":/energy|electricity|gas|oil|spot/.test(p.measure)?"eia_list_routes":"bis_list_datasets",arguments:{query:/gdp/.test(p.measure)?"GDP":p.measure.replaceAll("_"," ")}}]),
     limitations:["Curated exact-measure registry, not an exhaustive provider search. Some series definitions use documented provider series IDs; the evidence identifies those cases.","Matched national definitions do not remove differences in baskets, national methodology or compilation. Read candidate and country notes.","Latest available common observations need not be consecutive; commonPeriods lists the actual dates.","Verification checks may reuse cached evidence. retrievedAt records the original retrieval; this is not a historical vintage archive."]};
 }

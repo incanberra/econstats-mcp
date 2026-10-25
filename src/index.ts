@@ -63,14 +63,14 @@ HARD RULES:
 - Don't compute averages or trends in your head — cite specific data points.
 
 SOURCE ROUTING:
-- For source recommendations, call select_source with an exact measure and country codes. It verifies structured provider records and returns definitions, aligned observations, citations, and rejection reasons. Never treat an unverified plan as confirmed data or silently override a preferred source. If no exact match is verified, refine the definition or use provider discovery tools.
+- For source recommendations, call select_source with the exact measure, country codes, requested dates and purpose. Include partner, product, industry or location filters when relevant. For discovery_required, follow the returned discovery steps and requirements before fetching exact data. It verifies structured provider records and returns definitions, aligned observations, citations, and rejection reasons. Never treat an unverified plan as confirmed data or silently override a preferred source. If no exact match is verified, refine the definition or use provider discovery tools.
 - Honor an explicitly requested source. Otherwise choose by the requested measure, geography, frequency, comparable definitions and latest usable observations; there is no universal best source.
 - Prefer the original statistical producer for release-day or detailed national figures. FRED is convenient redistribution; identify the underlying producer when available. Prefer harmonised definitions for country comparisons.
 - Australian data: abs_list_datasets, abs_get_structure, abs_get_data. Validate codes, adjustment, units and publication freshness.
 - Merchandise trade: comtrade_list_reference, comtrade_search_products, comtrade_get_availability, then comtrade_get_data. Use numeric Comtrade area codes, exact products and periods. Public preview completeness is unverified. Distinguish reporting countries from partners, World totals from bilateral trade, HS editions, value from quantity and exports from re-exports. Do not sum overlapping totals or substitute mirror trade. Authenticated access requires COMTRADE_API_KEY; never expose it.
 - Direct data tools return structuredContent schemaVersion 1.0 and text rendered from the same observations. Unknown units/scaling stay null; native values are not silently transformed.
 - Use fresh=true for an explicit revision check, then revision_history with the returned series_id. These are observed snapshots, not official publication vintages.
-- US macro → fred_get_series (check series_id from common IDs below)
+- US macro: choose by purpose through select_source; FRED redistributes producer data and is not a universal first choice.
 - Granular CPI/employment (metro, industry) → bls_get_series
 - US NIPA GDP detail → bea_get_data. State/regional and GDP-by-industry APIs are not exposed by this tool.
 - International → imf_list_datasets, imf_get_structure, then imf_get_data with current dataset codes. IFS was split into topic datasets.
@@ -114,19 +114,28 @@ server.tool(
 
 server.tool(
   "select_source",
-  "Recommend economic sources for an EXACT measure and countries. Uses a curated registry and checks structured provider observations, country, units/scaling, frequency, adjustment and transformation. Returns aligned numeric observations, provenance, common periods, age, all exact-match alternatives and rejection reasons. Missing required metadata prevents verification; provider-specific caveats remain visible. No silent CPI/CPIH/HICP or GDP-growth substitutions. Honor preferred_source even if unavailable; verify=false returns explicitly unverified plans. Coverage checks are not an exhaustive catalogue or vintage audit. Some recognized measures require dataset discovery when no exact template is registered.",
+  "Recommend economic sources for an EXACT measure and countries. Uses a curated registry and checks structured provider observations, country, units/scaling, frequency, adjustment and transformation. Returns aligned numeric observations, provenance, common periods, age, all exact-match alternatives and rejection reasons. Missing required metadata prevents verification; provider-specific caveats remain visible. No silent CPI/CPIH/HICP or GDP-growth substitutions. Honor preferred_source even if unavailable; verify=false returns explicitly unverified plans. Coverage checks are not an exhaustive catalogue or vintage audit. Trade, TiVA, agriculture and shipping return explicit discovery plans until native codes and observations are validated. Date ranges constrain retrieval. Ranking uses latest, comparison or release purpose; discovery_required never means verified data.",
   {
     measure:z.enum(MEASURES).describe("Exact statistical definition; ask the user if the requested definition is ambiguous"),
-    countries:z.array(z.string()).min(1).max(5).describe("ISO2/ISO3 codes, e.g. US/USA, GB/GBR, DE/DEU; EA for euro area"),
+    countries:z.array(z.string()).max(5).describe("1–5 reporting country ISO2/ISO3 codes; EA for euro area. For named shipping locations only, [] is allowed. TiVA: final-demand destinations for foreign value added in final demand, exporters for domestic value added in exports."),
     frequency:z.enum(["daily","weekly","monthly","quarterly","annual"]).optional(),
     purpose:z.enum(["latest","comparison","release"]).optional(),
     preferred_source:z.enum(SOURCES).optional().describe("Explicit source override; alternatives do not override it"),
-    observations:z.number().int().min(1).max(120).default(12).describe("Required common observations per country; incomplete coverage is disclosed"),
+    observations:z.number().int().min(1).max(120).optional().describe("Required common observations per country. Defaults to all monthly/quarterly/annual periods in a bounded date range (max 120), otherwise 12. Explicit count selects the latest common periods inside the range."),
     verify:z.boolean().default(true).describe("Verify structured provider records and definitions, reusing source caches"),
     max_age_days:z.number().int().min(0).optional().describe("Maximum age of latest common observation period, measured at period end"),
+    start_period:z.string().optional().describe('Inclusive start: YYYY or a period at the requested frequency.'),
+    end_period:z.string().optional().describe('Inclusive end: YYYY or a period at the requested frequency.'),
+    partner_countries:z.array(z.string()).min(1).max(5).optional().describe('Trade partners; TiVA origin for foreign value added in final demand, destination for domestic value added in exports. WLD means World.'),
+    product_query:z.string().min(1).max(200).optional().describe('Product description for merchandise trade or agriculture discovery.'),
+    product_codes:z.array(z.string().regex(/^(TOTAL|\d{2}|\d{4}|\d{6})$/)).min(1).max(10).optional().describe('Exact merchandise HS codes, checked through discovery.'),
+    classification:z.enum(['H0','H1','H2','H3','H4','H5','H6']).optional().describe('Pinned HS edition for merchandise comparisons.'),
+    industry_query:z.string().min(1).max(200).optional().describe('TiVA industry description to resolve against the discovered structure.'),
+    location_query:z.string().min(1).max(200).optional().describe('Port or chokepoint name for shipping discovery.'),
+    location_type:z.enum(['ports','chokepoints']).optional().describe('Location type, particularly for vessel transits.'),
   },
-  async ({measure,countries,frequency,purpose,preferred_source,observations,verify,max_age_days})=>{
-    try{return txt(await client.selectSource({measure,countries,frequency,purpose,preferredSource:preferred_source,observations,verify,maxAgeDays:max_age_days}));}
+  async ({measure,countries,frequency,purpose,preferred_source,observations,verify,max_age_days,start_period,end_period,partner_countries,product_query,product_codes,classification,industry_query,location_query,location_type})=>{
+    try{return txt(await client.selectSource({measure,countries,frequency,purpose,preferredSource:preferred_source,observations,verify,maxAgeDays:max_age_days,startPeriod:start_period,endPeriod:end_period,partnerCountries:partner_countries,productQuery:product_query,productCodes:product_codes,classification,industryQuery:industry_query,locationQuery:location_query,locationType:location_type}));}
     catch{return {...txt("Source selection error: invalid request or unavailable lookup. Check the measure, country codes and frequency."),isError:true};}
   }
 );
@@ -148,6 +157,8 @@ server.tool(
   {
     fresh:z.boolean().default(false).describe("Bypass observation cache to check revisions; budgets and cooldowns still apply."),
     series_id: z.string().describe("FRED series ID, e.g. CPIAUCSL, UNRATE, GDPC1"),
+    start_period:z.string().optional().describe('Inclusive start date YYYY-MM-DD.'),
+    end_period:z.string().optional().describe('Inclusive end date YYYY-MM-DD.'),
     limit: z.number().default(36).describe("Observations (default 36 = 3 years monthly)"),
     units: z.enum(["lin", "pc1", "pch", "ch1", "chg"]).default("lin").describe("lin=levels, pc1=YoY%, pch=MoM%, chg=change"),
   },

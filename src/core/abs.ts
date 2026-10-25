@@ -1,3 +1,4 @@
+import {rankCatalogue} from './catalogue-search';
 import {XMLParser} from 'fast-xml-parser';
 import {parse} from 'csv-parse/sync';
 import {providerFetch} from './access';
@@ -48,7 +49,7 @@ export function validateSdmxKey(def:SdmxDefinition,key:string){
 }
 export function absCatalogue(xml:string,query='',offset=0,limit=20){
   if(!Number.isInteger(offset)||offset<0||!Number.isInteger(limit)||limit<1||limit>50)throw new Error('Invalid catalogue pagination.');
-  const words=query.toLowerCase().split(/\s+/).filter(Boolean),flows=list(sdmxStructures(xml).Dataflows?.Dataflow).filter(f=>f.agencyID==='ABS'&&words.every(t=>`${f.id} ${english(f)}`.toLowerCase().includes(t)));
+  const flows=rankCatalogue(list(sdmxStructures(xml).Dataflows?.Dataflow).filter(f=>f.agencyID==='ABS'),query,f=>({id:f.id,name:english(f)}));
   return {source:'ABS',url:ABS_CATALOG_URL,total:flows.length,offset,datasets:flows.slice(offset,offset+limit).map(f=>({id:f.id,version:String(f.version),label:english(f)})),notes:['Catalogue codes do not guarantee current data coverage. Inspect structure before retrieval.']};
 }
 export function absStructure(xml:string,id:string,version?:string,dimensionId?:string,query='',offset=0,limit=50){
